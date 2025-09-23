@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import io
+import logging
 from typing import ClassVar
 
 import chess
@@ -14,6 +15,8 @@ from data.tokens import (
     TerminationTokens,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class Tokenizer:
     elo_digit_tokens: ClassVar[list[str]] = [f"<elo_digit:{digit}>" for digit in ELO_DIGITS]
@@ -25,7 +28,8 @@ class Tokenizer:
     termination_tokens: ClassVar[list[str]] = [token.value for token in TerminationTokens]
 
     bos_token: ClassVar[str] = "<bos>"
-    special_tokens: ClassVar[list[str]] = [bos_token]
+    unk_token: ClassVar[str] = "<unk>"
+    special_tokens: ClassVar[list[str]] = [bos_token, unk_token]
 
     vocab: ClassVar[list[str]] = (
         elo_digit_tokens
@@ -77,10 +81,6 @@ class ParsedGame:
 
 
 def parse_game(game: dict) -> ParsedGame:
-    # Rated-only for now
-    if not str(game.get("Event", "")).startswith("Rated"):
-        raise ValueError("Only rated games are supported in this WIP tokenizer.")
-
     tc = game["TimeControl"]
     if "+" in tc:
         seconds_per_side, increment = tc.split("+", 1)
@@ -88,9 +88,11 @@ def parse_game(game: dict) -> ParsedGame:
         seconds_per_side, increment = "*", "*"  # correspondence game
 
     if seconds_per_side not in SECONDS_PER_SIDE:
-        raise ValueError(f"seconds_per_side {seconds_per_side} not in vocabulary.")
+        logger.debug("seconds_per_side %s not in vocabulary.", seconds_per_side)
+        seconds_per_side = Tokenizer.unk_token
     if increment not in INCREMENTS:
-        raise ValueError(f"increment {increment} not in vocabulary.")
+        logger.debug("increment %s not in vocabulary.", increment)
+        increment = Tokenizer.unk_token
 
     white_elo = digitize_elo(game["WhiteElo"])
     black_elo = digitize_elo(game["BlackElo"])

@@ -48,3 +48,6 @@ tmp.py
 *.pkl
 *.csv
 elo_heatmap*.png
+data/tokens
+logs/
+data/dataset

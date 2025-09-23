@@ -18,12 +18,13 @@ format_cap = 50000
 format_sampling = {}
 
 for k, v in format_counts.items():
-    if v > format_cap:
-        fs = format_cap / v
-    else:
-        fs = 1.0
+    fs = format_cap / v if v > format_cap else 1.0
     if "Bullet" in k:
-        fs *= 0.25
+        fs *= 0.1
+    if "HyperBullet" in k:
+        fs *= 0.1
+    if "Blitz" in k:
+        fs *= 0.75
     if fs < 1.0:
         format_sampling[k] = fs
 print("***format_sampling***", format_sampling, sep="\n")
