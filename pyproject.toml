@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chess-v2"
+version = "0.1.0"
+description = "Chess engine/analysis sandbox"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Yiming Zhang", email = "yimingz3@cs.cmu.edu" }
+]
+keywords = ["chess", "engine", "analysis"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+    "datasets>=4.1.1",
+    "huggingface-hub>=0.35.0",
+    "matplotlib>=3.10.6",
+    "numpy>=2.3.3",
+    "pandas>=2.3.2",
+    "python-chess>=1.999",
+    "seaborn>=0.13.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/"  # update if applicable
+
+[tool.uv]
+package = true
+dev-dependencies = [
+  "ruff>=0.6",
+  "pytest>=8",
+  "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data", "src/model"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "N", "RUF"]
+# The formatter enforces line length; disable the linter's E501.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["data", "model"]
+combine-as-imports = true
+force-sort-within-sections = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+
