@@ -1,30 +1,32 @@
 # chess-v2
 
-A minimal Python project scaffold configured for `uv`.
-
-### Requirements
-- uv
-
 ### Quickstart
 ```bash
 # Create and sync the virtual environment from pyproject
 uv sync
 
-# Activate the virtual environment (POSIX)
+# Activate the virtual environment (ensures `which python` points to the venv)
 source .venv/bin/activate
 
-# Verify Python
-uv run python -V
+# Install runtime deps
+uv pip install megatron-core[mlm]
+uv pip install --no-build-isolation transformer-engine[pytorch]
 
-# Run tests
-uv run pytest
+# Clone Megatron-LM and install from source with the active interpreter
+git clone https://github.com/NVIDIA/Megatron-LM.git
+cd Megatron-LM
+git checkout core_v0.13.1
+uv pip install .
+uv pip install psutil
+uv pip install 'numpy<2.0.0'
 
-# Lint & format with ruff
-uv run ruff check .
-uv run ruff format .
+# Build the C++ dataset helper against the same interpreter (fixes python3 vs python mismatches)
+cd megatron/core/datasets
+rm -f helpers_cpp*.so
+make PYTHON="$(which python)"
+cd ../../../..
 
-# Type check
-uv run mypy .
+bash ../scripts/apex.sh
 ```
 
 ### Common uv commands

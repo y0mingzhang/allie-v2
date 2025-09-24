@@ -53,6 +53,10 @@ class Tokenizer:
         """Convert token IDs back to token strings."""
         return [cls.idx_to_token[int(token_id)] for token_id in token_ids]
 
+    @classmethod
+    def vocab_size(cls) -> int:
+        return len(cls.vocab)
+
 
 def digitize_elo(elo: int) -> list[str]:
     assert 100 <= elo <= 9999
@@ -130,3 +134,7 @@ def tokenize_game(parsed_game: ParsedGame) -> np.ndarray:
 
     # Convert string tokens to IDs
     return Tokenizer.encode(tokens)
+
+
+if __name__ == "__main__":
+    print(Tokenizer.vocab_size())

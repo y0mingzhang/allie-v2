@@ -14,6 +14,7 @@
 
 source /home/yimingz3/src/chess-v2/.venv/bin/activate
 
+rm -rf /scratch/yimingz3/
 export HF_HOME=/home/yimingz3/.cache/huggingface
 export HF_HUB_CACHE=/scratch/yimingz3/hf_cache/hub
 export HF_DATASETS_CACHE=/scratch/yimingz3/hf_cache/datasets

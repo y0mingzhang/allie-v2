@@ -48,6 +48,9 @@ tmp.py
 *.pkl
 *.csv
 elo_heatmap*.png
-data/tokens
+data/*
+!data/chess_parquets_shuffled.txt
 logs/
-data/dataset
+.bad_venv/
+checkpoints
+benchmark_cache_*/

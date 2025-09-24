@@ -256,7 +256,11 @@ def _is_processed_parquet_ok(path: str) -> bool:
     try:
         tokens_field = table.schema.field("tokens").type
         # Accept list/large_list/fixed_size_list of uint16
-        if pa.types.is_list(tokens_field) or pa.types.is_large_list(tokens_field) or pa.types.is_fixed_size_list(tokens_field):
+        if (
+            pa.types.is_list(tokens_field)
+            or pa.types.is_large_list(tokens_field)
+            or pa.types.is_fixed_size_list(tokens_field)
+        ):
             value_type = tokens_field.value_type
         else:
             logger.warning("Parquet %s 'tokens' not a list type: %s", path, tokens_field)
