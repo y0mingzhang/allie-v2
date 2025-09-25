@@ -3,11 +3,9 @@ import logging
 import os
 import random
 
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import Dataset, load_dataset
 from datasets.utils.logging import disable_progress_bar
-import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from data.tokenizer import parse_game, tokenize_game
@@ -19,111 +17,153 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 disable_progress_bar()
 
-
-format_sampling = {
-    "Rated Bullet": 0.005925258785677465,
-    "Rated Rapid": 0.1667055646317474,
-    "Rated UltraBullet": 0.1,
-    "Rated Blitz": 0.03162848756789582,
-}
-elo_sampling = {
-    (2000, 2000): 0.06818956699624958,
-    (1400, 1500): 0.052534804307853955,
-    (1800, 1700): 0.060808756460930376,
-    (1400, 1400): 0.01954461057363432,
-    (1300, 1400): 0.06325110689437065,
-    (1100, 1100): 0.04265301770100235,
-    (1200, 1200): 0.028429282160625444,
-    (1700, 1600): 0.055509297807382736,
-    (1500, 1500): 0.01508523155830442,
-    (1600, 1600): 0.018195050946142648,
-    (1900, 1800): 0.08247422680412371,
-    (1400, 1300): 0.062421972534332085,
-    (1300, 1300): 0.0221483942414175,
-    (1500, 1600): 0.05023863350916855,
-    (1300, 1100): 0.39215686274509803,
-    (1700, 1900): 0.27548209366391185,
-    (1900, 1900): 0.039401103230890466,
-    (1800, 1800): 0.026263952724885097,
-    (1700, 1700): 0.02008233758409479,
-    (1800, 1900): 0.08123476848090982,
-    (900, 900): 0.14781966001478197,
-    (800, 800): 0.37453183520599254,
-    (1700, 1800): 0.06207324643078833,
-    (1100, 1200): 0.09328358208955224,
-    (1200, 1000): 0.4819277108433735,
-    (2000, 1900): 0.12048192771084337,
-    (1400, 1200): 0.31446540880503143,
-    (1200, 1300): 0.07385524372230429,
-    (1000, 1000): 0.06997900629811056,
-    (1100, 1000): 0.12338062924120913,
-    (1100, 1300): 0.42283298097251587,
-    (1800, 1600): 0.2484472049689441,
-    (1200, 1600): 0.8333333333333334,
-    (1700, 1500): 0.2,
-    (1600, 1700): 0.05496015388843089,
-    (900, 1000): 0.18066847335140018,
-    (1200, 1100): 0.0974184120798831,
-    (2000, 2100): 0.20161290322580644,
-    (2200, 2200): 0.29027576197387517,
-    (1000, 900): 0.19102196752626552,
-    (1500, 1400): 0.05012531328320802,
-    (2100, 2000): 0.20040080160320642,
-    (800, 900): 0.4,
-    (900, 1100): 0.6172839506172839,
-    (1900, 2000): 0.12578616352201258,
-    (1600, 1500): 0.05003752814610958,
-    (2000, 1700): 0.6666666666666666,
-    (1300, 1600): 0.3968253968253968,
-    (2100, 2200): 0.37523452157598497,
-    (2100, 2100): 0.1313197636244255,
-    (1900, 1700): 0.2635046113306983,
-    (1300, 1200): 0.07541478129713423,
-    (2200, 2100): 0.37105751391465674,
-    (1600, 1800): 0.24242424242424243,
-    (2300, 2300): 0.6644518272425249,
-    (1500, 1300): 0.19821605550049554,
-    (1400, 1600): 0.23121387283236994,
-    (1500, 1800): 0.398406374501992,
-    (1300, 1500): 0.21367521367521367,
-    (1400, 1800): 0.9009009009009009,
-    (2000, 2200): 0.8264462809917356,
-    (1000, 1100): 0.12586532410320955,
-    (1900, 1600): 0.554016620498615,
-    (1400, 1100): 0.8438818565400844,
-    (2000, 1800): 0.37243947858473,
-    (1800, 1500): 0.37243947858473,
-    (1500, 1200): 0.4175365344467641,
-    (900, 800): 0.4048582995951417,
-    (1800, 2000): 0.352112676056338,
-    (1500, 1100): 0.8733624454148472,
-    (2100, 1900): 0.547945205479452,
-    (1100, 1400): 0.8264462809917356,
-    (1900, 2100): 0.49875311720698257,
-    (1200, 1500): 0.4750593824228028,
-    (1600, 1200): 0.8403361344537815,
-    (2200, 2300): 0.8097165991902834,
-    (1700, 2000): 0.7246376811594203,
-    (1400, 1700): 0.4819277108433735,
-    (1200, 1400): 0.3412969283276451,
-    (1600, 1400): 0.22598870056497175,
-    (1500, 1700): 0.19120458891013384,
-    (2200, 2000): 0.9259259259259259,
-    (1100, 1500): 0.9090909090909091,
-    (1600, 1900): 0.5830903790087464,
-    (1000, 800): 0.9259259259259259,
-    (1500, 1900): 0.7936507936507936,
-    (1300, 1000): 0.9852216748768473,
-    (1900, 1500): 0.8771929824561403,
-    (2300, 2200): 0.823045267489712,
-    (1700, 1400): 0.45662100456621,
-    (1100, 900): 0.6172839506172839,
-    (1700, 1300): 0.7905138339920948,
-    (1600, 1300): 0.35398230088495575,
-    (1800, 1400): 0.8928571428571429,
-    (1300, 1700): 0.8620689655172413,
-    (1000, 1300): 0.91324200913242,
-    (1000, 1200): 0.4878048780487805,
+keep_ratio = {
+    ("Rated Blitz", 400): 1.00000000,
+    ("Rated Blitz", 500): 1.00000000,
+    ("Rated Blitz", 600): 1.00000000,
+    ("Rated Blitz", 700): 0.72235112,
+    ("Rated Blitz", 800): 0.30747959,
+    ("Rated Blitz", 900): 0.16453221,
+    ("Rated Blitz", 1000): 0.10575061,
+    ("Rated Blitz", 1100): 0.08115952,
+    ("Rated Blitz", 1200): 0.06360318,
+    ("Rated Blitz", 1300): 0.05203546,
+    ("Rated Blitz", 1400): 0.04565920,
+    ("Rated Blitz", 1500): 0.04089603,
+    ("Rated Blitz", 1600): 0.03869786,
+    ("Rated Blitz", 1700): 0.03841250,
+    ("Rated Blitz", 1800): 0.04017861,
+    ("Rated Blitz", 1900): 0.04789621,
+    ("Rated Blitz", 2000): 0.06477250,
+    ("Rated Blitz", 2100): 0.10071058,
+    ("Rated Blitz", 2200): 0.18222968,
+    ("Rated Blitz", 2300): 0.35476887,
+    ("Rated Blitz", 2400): 0.76532284,
+    ("Rated Blitz", 2500): 1.00000000,
+    ("Rated Blitz", 2600): 1.00000000,
+    ("Rated Blitz", 2700): 1.00000000,
+    ("Rated Blitz", 2800): 1.00000000,
+    ("Rated Blitz", 2900): 1.00000000,
+    ("Rated Blitz", 3000): 1.00000000,
+    ("Rated Bullet", 400): 1.00000000,
+    ("Rated Bullet", 500): 1.00000000,
+    ("Rated Bullet", 600): 1.00000000,
+    ("Rated Bullet", 700): 0.35023249,
+    ("Rated Bullet", 800): 0.13953627,
+    ("Rated Bullet", 900): 0.06992065,
+    ("Rated Bullet", 1000): 0.04321353,
+    ("Rated Bullet", 1100): 0.03173244,
+    ("Rated Bullet", 1200): 0.02422802,
+    ("Rated Bullet", 1300): 0.01970780,
+    ("Rated Bullet", 1400): 0.01694768,
+    ("Rated Bullet", 1500): 0.01484727,
+    ("Rated Bullet", 1600): 0.01369574,
+    ("Rated Bullet", 1700): 0.01344519,
+    ("Rated Bullet", 1800): 0.01384097,
+    ("Rated Bullet", 1900): 0.01534650,
+    ("Rated Bullet", 2000): 0.01851822,
+    ("Rated Bullet", 2100): 0.02520809,
+    ("Rated Bullet", 2200): 0.03838693,
+    ("Rated Bullet", 2300): 0.06063675,
+    ("Rated Bullet", 2400): 0.10931648,
+    ("Rated Bullet", 2500): 0.21127398,
+    ("Rated Bullet", 2600): 0.39336253,
+    ("Rated Bullet", 2700): 0.73892405,
+    ("Rated Bullet", 2800): 1.00000000,
+    ("Rated Bullet", 2900): 1.00000000,
+    ("Rated Bullet", 3000): 1.00000000,
+    ("Rated Bullet", 3100): 1.00000000,
+    ("Rated Bullet", 3200): 1.00000000,
+    ("Rated Classical", 600): 1.00000000,
+    ("Rated Classical", 700): 1.00000000,
+    ("Rated Classical", 800): 1.00000000,
+    ("Rated Classical", 900): 1.00000000,
+    ("Rated Classical", 1000): 1.00000000,
+    ("Rated Classical", 1100): 1.00000000,
+    ("Rated Classical", 1200): 1.00000000,
+    ("Rated Classical", 1300): 1.00000000,
+    ("Rated Classical", 1400): 0.99701110,
+    ("Rated Classical", 1500): 0.86754598,
+    ("Rated Classical", 1600): 1.00000000,
+    ("Rated Classical", 1700): 1.00000000,
+    ("Rated Classical", 1800): 1.00000000,
+    ("Rated Classical", 1900): 1.00000000,
+    ("Rated Classical", 2000): 1.00000000,
+    ("Rated Classical", 2100): 1.00000000,
+    ("Rated Classical", 2200): 1.00000000,
+    ("Rated Classical", 2300): 1.00000000,
+    ("Rated Classical", 2400): 1.00000000,
+    ("Rated Classical", 2500): 1.00000000,
+    ("Rated Classical", 2600): 1.00000000,
+    ("Rated Classical", 2700): 1.00000000,
+    ("Rated Classical", 2800): 1.00000000,
+    ("Rated Correspondence", 800): 1.00000000,
+    ("Rated Correspondence", 900): 1.00000000,
+    ("Rated Correspondence", 1000): 1.00000000,
+    ("Rated Correspondence", 1100): 1.00000000,
+    ("Rated Correspondence", 1200): 1.00000000,
+    ("Rated Correspondence", 1300): 1.00000000,
+    ("Rated Correspondence", 1400): 1.00000000,
+    ("Rated Correspondence", 1500): 1.00000000,
+    ("Rated Correspondence", 1600): 1.00000000,
+    ("Rated Correspondence", 1700): 1.00000000,
+    ("Rated Correspondence", 1800): 1.00000000,
+    ("Rated Correspondence", 1900): 1.00000000,
+    ("Rated Correspondence", 2000): 1.00000000,
+    ("Rated Correspondence", 2100): 1.00000000,
+    ("Rated Correspondence", 2200): 1.00000000,
+    ("Rated Correspondence", 2300): 1.00000000,
+    ("Rated Correspondence", 2400): 1.00000000,
+    ("Rated Correspondence", 2500): 1.00000000,
+    ("Rated Correspondence", 2600): 1.00000000,
+    ("Rated Rapid", 400): 1.00000000,
+    ("Rated Rapid", 500): 1.00000000,
+    ("Rated Rapid", 600): 1.00000000,
+    ("Rated Rapid", 700): 1.00000000,
+    ("Rated Rapid", 800): 0.80628453,
+    ("Rated Rapid", 900): 0.44433873,
+    ("Rated Rapid", 1000): 0.28256792,
+    ("Rated Rapid", 1100): 0.21764459,
+    ("Rated Rapid", 1200): 0.16804908,
+    ("Rated Rapid", 1300): 0.13959675,
+    ("Rated Rapid", 1400): 0.12149435,
+    ("Rated Rapid", 1500): 0.11385523,
+    ("Rated Rapid", 1600): 0.11718799,
+    ("Rated Rapid", 1700): 0.13019962,
+    ("Rated Rapid", 1800): 0.15212717,
+    ("Rated Rapid", 1900): 0.21074483,
+    ("Rated Rapid", 2000): 0.35586375,
+    ("Rated Rapid", 2100): 0.69701493,
+    ("Rated Rapid", 2200): 1.00000000,
+    ("Rated Rapid", 2300): 1.00000000,
+    ("Rated Rapid", 2400): 1.00000000,
+    ("Rated Rapid", 2500): 1.00000000,
+    ("Rated Rapid", 2600): 1.00000000,
+    ("Rated Rapid", 2700): 1.00000000,
+    ("Rated Rapid", 2800): 1.00000000,
+    ("Rated Rapid", 2900): 1.00000000,
+    ("Rated Rapid", 3000): 1.00000000,
+    ("Rated UltraBullet", 500): 1.00000000,
+    ("Rated UltraBullet", 600): 1.00000000,
+    ("Rated UltraBullet", 700): 1.00000000,
+    ("Rated UltraBullet", 800): 1.00000000,
+    ("Rated UltraBullet", 900): 1.00000000,
+    ("Rated UltraBullet", 1000): 1.00000000,
+    ("Rated UltraBullet", 1100): 1.00000000,
+    ("Rated UltraBullet", 1200): 0.73197492,
+    ("Rated UltraBullet", 1300): 0.46403021,
+    ("Rated UltraBullet", 1400): 0.33870032,
+    ("Rated UltraBullet", 1500): 0.28031212,
+    ("Rated UltraBullet", 1600): 0.28934325,
+    ("Rated UltraBullet", 1700): 0.34767719,
+    ("Rated UltraBullet", 1800): 0.48767753,
+    ("Rated UltraBullet", 1900): 0.67446563,
+    ("Rated UltraBullet", 2000): 1.00000000,
+    ("Rated UltraBullet", 2100): 1.00000000,
+    ("Rated UltraBullet", 2200): 1.00000000,
+    ("Rated UltraBullet", 2300): 1.00000000,
+    ("Rated UltraBullet", 2400): 1.00000000,
+    ("Rated UltraBullet", 2500): 1.00000000,
 }
 
 
@@ -137,23 +177,26 @@ def valid(game: dict):
     for key in ["Event", "WhiteElo", "BlackElo", "TimeControl", "movetext", "Termination"]:
         if game[key] is None:
             return False
-    return True
+    ev = game["Event"]
+    format = " ".join(ev.split(" ")[:2])
+    return format.startswith("Rated ")
 
 
-def filter_by_format(game: dict):
-    format = " ".join(game["Event"].split(" ")[:2])
-    return format.startswith("Rated ") and random.random() < format_sampling.get(format, 1.0)
+def passes_filter(game: dict) -> bool:
+    w = game["WhiteElo"]
+    b = game["BlackElo"]
+    ev = game["Event"]
 
-
-def filter_by_elo(game: dict):
-    white_bucket = get_elo_bucket(game["WhiteElo"])
-    black_bucket = get_elo_bucket(game["BlackElo"])
-    return random.random() < elo_sampling.get((white_bucket, black_bucket), 1.0)
+    bucket = get_elo_bucket(int((w + b) / 2))
+    format = " ".join(ev.split(" ")[:2])
+    if not format.startswith("Rated "):
+        return False
+    return random.random() < keep_ratio.get((format, bucket), 1.0)
 
 
 def should_keep_game(game: dict) -> bool:
     """Determine if a game should be kept based on bucket weights."""
-    return valid(game) and filter_by_format(game) and filter_by_elo(game)
+    return valid(game) and passes_filter(game)
 
 
 def process_game(game: dict) -> dict:
@@ -278,41 +321,29 @@ def _is_processed_parquet_ok(path: str) -> bool:
 
 def process_shards(
     paths: list[str],
-    token_path: str,
     dataset_root_path: str,
 ) -> None:
     """Read a list of parquet paths, filter games, tokenize, and save concatenated tokens.
 
     Filtering uses the same logic as single-parquet processing in this module.
     """
-
-    shards = concatenate_datasets(
-        [process_shard(path, dataset_root_path) for path in paths]
-    ).shuffle()
-    # Flatten Arrow list column to a single Arrow array, then convert to NumPy
-    arr = pc.list_flatten(shards.data.table.column("tokens"))
-    tokens = np.asarray(arr.to_numpy(), dtype=np.uint16)
-
-    np.save(token_path, tokens)
-    logger.info("Got %d tokens from %d shards, saved to %s", len(tokens), len(shards), token_path)
+    for path in paths:
+        process_shard(path, dataset_root_path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     # List-concat mode
     parser.add_argument(
-        "--list-file", help="Text file with one parquet path per line", required=True
+        "--list-file",
+        help="Text file with one parquet path per line",
+        default="data/chess_parquets_shuffled.txt",
     )
     parser.add_argument(
         "--start", type=int, help="Start index in the parquet list (inclusive)", required=True
     )
     parser.add_argument(
         "--end", type=int, help="End index in the parquet list (exclusive)", required=True
-    )
-    parser.add_argument(
-        "--token-path",
-        help=("Path to write concatenated token ids as NumPy .npy (list mode) locally."),
-        required=True,
     )
     parser.add_argument(
         "--dataset-root-path",
@@ -329,7 +360,6 @@ def main() -> None:
 
     process_shards(
         paths,
-        args.token_path,
         args.dataset_root_path,
     )
 

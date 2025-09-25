@@ -104,7 +104,6 @@ TRAINING_ARGS=(
     --calculate-per-token-loss 
     --manual-gc 
     --empty-unused-memory-level 1 
-    --exit-duration-in-mins 235 
 )
 
 # Conditional arguments based on DTYPE (FP8)

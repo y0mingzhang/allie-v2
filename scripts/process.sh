@@ -9,7 +9,7 @@
 #SBATCH --signal=B:SIGUSR1@60
 #SBATCH --mail-user=yimingz3@cs.cmu.edu
 #SBATCH --requeue
-#SBATCH --output=logs/%A_%a.log
+#SBATCH --output=logs/process/%A_%a.log
 #SBATCH --array=0-500%100
 
 source /home/yimingz3/src/chess-v2/.venv/bin/activate
@@ -23,10 +23,9 @@ export HF_XET_CACHE=/scratch/yimingz3/hf_cache/xet
 # Required env vars (provide defaults where sensible)
 REPO_ROOT=${REPO_ROOT:-/home/yimingz3/src/chess-v2}
 LIST_FILE=${LIST_FILE:-$REPO_ROOT/data/chess_parquets_shuffled.txt}
-OUT_DIR=${OUT_DIR:-$REPO_ROOT/data/tokens}
-DATASET_ROOT_PATH=${DATASET_ROOT_PATH:-$REPO_ROOT/data/dataset}
+DATASET_ROOT_PATH=${DATASET_ROOT_PATH:-$REPO_ROOT/data/dataset_v2}
 
-mkdir -p "$REPO_ROOT/logs" "$OUT_DIR" "$DATASET_ROOT_PATH"
+mkdir -p "$REPO_ROOT/logs" "$DATASET_ROOT_PATH"
 
 # Count non-empty, non-comment lines
 TOTAL=$(grep -vE '^\s*(#|$)' "$LIST_FILE" | wc -l)
@@ -55,13 +54,10 @@ fi
 end=$(( start + CHUNK ))
 if [ "$end" -gt "$TOTAL" ]; then end="$TOTAL"; fi
 
-output="$OUT_DIR/tokens_${start}_${end}.npy"
-
-echo "Task $SLURM_ARRAY_TASK_ID: ${start}-${end} -> ${output} (total=$TOTAL, tasks=$TASKS, chunk=$CHUNK)"
+echo "Task $SLURM_ARRAY_TASK_ID: ${start}-${end} -> ${DATASET_ROOT_PATH} (total=$TOTAL, tasks=$TASKS, chunk=$CHUNK)"
 
 srun python -u "$REPO_ROOT/src/data/process_hf.py" \
   --list-file "$LIST_FILE" \
   --start "$start" \
   --end "$end" \
-  --token-path "$output" \
   --dataset-root-path "$DATASET_ROOT_PATH"

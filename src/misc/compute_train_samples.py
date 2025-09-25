@@ -21,10 +21,10 @@ except Exception as e:
 def _normalize_prefix(data_prefix: str) -> str:
     # Accept either prefix or explicit .idx/.bin path; convert to absolute prefix
     prefix = os.path.abspath(data_prefix)
-    if prefix.endswith('.idx') or prefix.endswith('.bin'):
+    if prefix.endswith(".idx") or prefix.endswith(".bin"):
         prefix = os.path.splitext(prefix)[0]
-    idx_path = prefix + '.idx'
-    bin_path = prefix + '.bin'
+    idx_path = prefix + ".idx"
+    bin_path = prefix + ".bin"
     if not (os.path.exists(idx_path) and os.path.exists(bin_path)):
         raise AssertionError(
             f"One or both of the .idx and .bin files cannot be found at the prefix: {prefix}.\n"
@@ -96,11 +96,17 @@ def main() -> int:
         ds = IndexedDataset(prefix, mmap=True)
         total_tokens = int(np.sum(ds.sequence_lengths))
         num_sequences = int(ds.sequence_lengths.shape[0])
-        idx_path = prefix + '.idx'
-        bin_path = prefix + '.bin'
+        idx_path = prefix + ".idx"
+        bin_path = prefix + ".bin"
         add_extra = 0 if args.no_add_extra_token else 1
-        samples_per_epoch = (total_tokens - add_extra) // args.seq_length if total_tokens > add_extra else 0
-        rounded = (samples_per_epoch // args.global_batch_size) * args.global_batch_size if samples_per_epoch > 0 else 0
+        samples_per_epoch = (
+            (total_tokens - add_extra) // args.seq_length if total_tokens > add_extra else 0
+        )
+        rounded = (
+            (samples_per_epoch // args.global_batch_size) * args.global_batch_size
+            if samples_per_epoch > 0
+            else 0
+        )
         print(
             "\n".join(
                 [
@@ -129,5 +135,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
