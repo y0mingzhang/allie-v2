@@ -12,7 +12,9 @@ export NCCL_P2P_NET_CHUNKSIZE=2097152
 export NCCL_AVOID_RECORD_STREAMS=1
 export WANDB_API_KEY=$(cat ~/secrets/wandb-api-key)
 
-RUN_NAME="llama3_1b_fp8"
+RUN_NAME_BASE="llama3_1b_fp8_v2"
+DATE_TAG=$(date +%Y%m%d_%H%M%S)
+RUN_NAME="${RUN_NAME_BASE}_${DATE_TAG}"
 CHECKPOINT_PATH=checkpoints/${RUN_NAME}
 mkdir -p "$(dirname "$CHECKPOINT_PATH")"
 
@@ -23,16 +25,9 @@ MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NODE_RANK=${NODE_RANK:-0}
 WORLD_SIZE=$(($GPUS_PER_NODE*$NUM_NODES))
-TRAIN_SAMPLES=5380602
-
-# Dataset prefix (no extension). Override by exporting DATA_PREFIX.
-DATA_PREFIX=${DATA_PREFIX:-"data/bin/0923_processed_data"}
-# Sanity check: ensure .idx and .bin exist
-if [ ! -f "${DATA_PREFIX}.idx" ] || [ ! -f "${DATA_PREFIX}.bin" ]; then
-    echo "Error: Dataset files not found for prefix: ${DATA_PREFIX}" >&2
-    echo "Expected: ${DATA_PREFIX}.idx and ${DATA_PREFIX}.bin" >&2
-    exit 1
-fi
+TRAIN_TOKENS="58182279365"
+VAL_TOKENS="11580727"
+TEST_TOKENS="11654644"
 
 # Path to the pretrain_gpt.py script
 PRETRAIN_SCRIPT_PATH="Megatron-LM/pretrain_gpt.py"
@@ -41,12 +36,13 @@ PRETRAIN_SCRIPT_PATH="Megatron-LM/pretrain_gpt.py"
 TP_SIZE=1
 CP_SIZE=1
 PP_SIZE=1
-MICRO_BATCH_SIZE=32
+MICRO_BATCH_SIZE=16
 GLOBAL_BATCH_SIZE=256
 DTYPE="fp8"
 SEQ_LENGTH=1024
 MAX_POSITION_EMBEDDINGS=1024
 NUM_WORKERS=4
+TRAIN_SAMPLES=$((TRAIN_TOKENS / SEQ_LENGTH))
 
 # Data cache path (useful for both mock and real data)
 DATA_CACHE_PATH="/scratch/yimingz3/chess-v2/benchmark_cache_${RUN_NAME}"
@@ -134,19 +130,53 @@ DDP_ARGS=(
 TRAINING_ARGS+=("${DDP_ARGS[@]}")
 
 
+# Expand .idx globs into prefix lists expected by Megatron (no extension)
+expand_idx_glob_to_prefixes() {
+    local pattern="$1"
+    local -n out_array_ref=$2
+    local matches=()
+    # Use nullglob to avoid literal pattern when no match
+    shopt -s nullglob
+    matches=( $pattern )
+    shopt -u nullglob
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        echo "Error: No files matched pattern: $pattern" >&2
+        exit 1
+    fi
+    out_array_ref=()
+    for f in "${matches[@]}"; do
+        out_array_ref+=( "${f%.idx}" )
+    done
+}
+
+TRAIN_PREFIXES=()
+VALID_PREFIXES=()
+TEST_PREFIXES=()
+expand_idx_glob_to_prefixes \
+    "/home/yimingz3/src/chess-v2/data/bin/0924_train_*_*.idx" TRAIN_PREFIXES
+expand_idx_glob_to_prefixes \
+    "/home/yimingz3/src/chess-v2/data/bin/0924_val_*_*.idx" VALID_PREFIXES
+expand_idx_glob_to_prefixes \
+    "/home/yimingz3/src/chess-v2/data/bin/0924_test_*_*.idx" TEST_PREFIXES
+
+
+
 # Data arguments for pre-tokenized chess data
 DATA_ARGS_LIST=(
-    "--data-path ${DATA_PREFIX}"
-    "--tokenizer-type NullTokenizer"
-    "--vocab-size 2350"
-    "--data-cache-path ${DATA_CACHE_PATH}"
-    "--split '100,0,0'"
+    "--train-data-path" "${TRAIN_PREFIXES[@]}"
+    "--valid-data-path" "${VALID_PREFIXES[@]}"
+    "--test-data-path"  "${TEST_PREFIXES[@]}"
+    "--tokenizer-type" "NullTokenizer"
+    "--vocab-size" "2350"
+    "--data-cache-path" "${DATA_CACHE_PATH}"
     "--no-create-attention-mask-in-dataloader"
-    "--num-workers ${NUM_WORKERS}"
+    "--num-workers" "${NUM_WORKERS}"
 )
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
+    --eval-interval 5
+    --eval-iters 20
     --save-interval 1000
     --log-throughput
     --ckpt-format torch_dist 
@@ -156,6 +186,7 @@ EVAL_AND_LOGGING_ARGS=(
     --wandb-project "chess-v2"
     --wandb-exp-name "${RUN_NAME}"
     --wandb-save-dir "${CHECKPOINT_PATH}/wandb"
+    --tensorboard-dir "${CHECKPOINT_PATH}/tb"
     --tensorboard-log-interval 10
 )
 
