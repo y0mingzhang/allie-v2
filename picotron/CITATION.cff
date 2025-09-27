@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: 'Picotron: A Distributed Training Framework for Education and Research Experimentation'
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Haojun
+    family-names: Zhao
+  - given-names: Ferdinand
+    family-names: Mom
+repository-code: 'https://github.com/huggingface/picotron'
+abstract: "Picotron is a distributed training framework designed for education and research experimentation."
+keywords:
+  - distributed training
+  - LLM
+  - pytorch
+license: Apache-2.0
+version: 0.1.0

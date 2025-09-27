@@ -54,3 +54,5 @@ logs/
 .bad_venv/
 checkpoints
 benchmark_cache_*/
+hf_model*
+wandb/

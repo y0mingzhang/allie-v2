@@ -1,0 +1,10 @@
+__pycache__
+*.pth
+.vscode/
+picotron.egg-info
+*.ipynb
+wandb
+tmp
+debug
+bench
+sandbox

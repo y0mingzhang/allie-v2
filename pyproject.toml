@@ -29,6 +29,7 @@ dependencies = [
     "python-chess>=1.999",
     "regex>=2025.9.18",
     "seaborn>=0.13.2",
+    "torch>=2.8.0",
 ]
 
 [project.urls]
