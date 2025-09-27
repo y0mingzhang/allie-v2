@@ -4,7 +4,7 @@ import json
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from safetensors import safe_open
+from safetensors import safe_open, SafetensorError
 import contextlib
 
 from picotron.model import FinalProjection
@@ -70,7 +70,11 @@ def init_model_with_materialized_weights(model, model_config, save_dir):
             shard_path = os.path.join(save_dir, index['weight_map'][sft_name])
             with safe_open(shard_path, framework="pytorch", device="cpu") as f:
                 hf_name = initialization_manager.convert_safetensors_to_hf_name(sft_name)
-                tensor = f.get_tensor(sft_name)
+                try:
+                    tensor = f.get_tensor(sft_name)
+                except SafetensorError:
+                    print(f"rank {pgm.process_group_manager.global_rank}: Skipping missing tensor {sft_name} in {shard_path}")
+                    continue
                 tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
                 state_dict[hf_name] = tensor
 
@@ -82,7 +86,11 @@ def init_model_with_materialized_weights(model, model_config, save_dir):
             
             for sft_name in layer_names:
                 hf_name = initialization_manager.convert_safetensors_to_hf_name(sft_name)
-                tensor = f.get_tensor(sft_name)
+                try:
+                    tensor = f.get_tensor(sft_name)
+                except SafetensorError:
+                    print(f"rank {pgm.process_group_manager.global_rank}: Skipping missing tensor {sft_name} in {safetensors_path}")
+                    continue
                 tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
                 state_dict[hf_name] = tensor
 
@@ -116,9 +124,21 @@ class InitializationManager:
     def __init__(self, model, model_config):
         self.model = model
         self.model_config = model_config
+        self._has_qk_norm = self._detect_qk_norm()
 
     def init_model_parameters(self):
         self.model.reset_parameters()
+
+    def _detect_qk_norm(self):
+        if hasattr(self.model, "decoder_layers"):
+            for layer in self.model.decoder_layers:
+                attention = getattr(layer, "attention", None)
+                if attention is not None and hasattr(attention, "q_norm"):
+                    return True
+        name = getattr(self.model_config, "name", "")
+        if isinstance(name, str) and "qwen" in name.lower():
+            return True
+        return False
 
     def get_layer_names_in_sft_format(self):
         """Get layer names in safetensors format based on model's layer distribution."""
@@ -133,6 +153,10 @@ class InitializationManager:
             "self_attn.q_proj",
             "self_attn.v_proj",
         ]
+
+        if self._has_qk_norm:
+            decoder_components.insert(5, "self_attn.q_norm")
+            decoder_components.insert(6, "self_attn.k_norm")
         
         # Generate base layer names
         layer_names = []
@@ -151,10 +175,10 @@ class InitializationManager:
             if pgm.process_group_manager.pp_is_first_stage:
                 layer_names.insert(0, "model.embed_tokens.weight")
             elif pgm.process_group_manager.pp_is_last_stage:
-                layer_names.extend(["model.norm.weight"])
+                layer_names.extend(["model.norm.weight", "lm_head.weight"])
         else:
             layer_names.insert(0, "model.embed_tokens.weight")
-            layer_names.extend(["model.norm.weight"])
+            layer_names.extend(["model.norm.weight", "lm_head.weight"])
 
         return layer_names
 
@@ -176,7 +200,8 @@ class InitializationManager:
 
         # Handle attention layers
         if 'attention' in name:
-            head_dim = hidden_size // self.model_config.num_attention_heads
+            # Use explicit head_dim if provided, otherwise fall back to hidden_size / num_heads.
+            head_dim = getattr(self.model_config, 'head_dim', hidden_size // self.model_config.num_attention_heads)
             
             if 'q_proj.weight' in name:
                 total_heads = self.model_config.num_attention_heads
@@ -187,21 +212,26 @@ class InitializationManager:
                 heads_per_rank = total_heads // tp_size
                 target_dim = heads_per_rank * head_dim
             elif 'out_proj.weight' in name:
-                # For out_proj, we split along the second dimension
+                # For out_proj, we split along the second dimension.
                 target_dim = tensor.shape[0]  # First dimension stays the same
-                if tensor.shape[1] != hidden_size // tp_size:
-                    tensor = tensor[:, (hidden_size // tp_size) * tp_rank:(hidden_size // tp_size) * (tp_rank + 1)]
+                rank_hidden = head_dim * (self.model_config.num_attention_heads // tp_size)
+                if tensor.shape[1] != rank_hidden:
+                    start = rank_hidden * tp_rank
+                    end = rank_hidden * (tp_rank + 1)
+                    tensor = tensor[:, start:end]
                 return tensor
             else:
                 return tensor
                 
             if tensor.shape[0] != target_dim:
                 if target_dim > tensor.shape[0]:
-                    pad_tensor = torch.empty(target_dim - tensor.shape[0], tensor.shape[1], 
-                                        dtype=tensor.dtype, device=tensor.device)
+                    pad_tensor = torch.empty(target_dim - tensor.shape[0], tensor.shape[1],
+                                             dtype=tensor.dtype, device=tensor.device)
                     tensor = torch.cat([tensor, pad_tensor], dim=0)
                 else:
                     tensor = tensor[:target_dim, :]
+
+            return tensor
 
         # Handle MLP layers
         elif 'mlp' in name:

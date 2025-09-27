@@ -30,7 +30,7 @@ import torch.distributed as dist
 from safetensors.torch import save_file
 from transformers import AutoConfig
 
-from picotron.model import Llama
+from picotron.model import Llama, Qwen3Model
 from picotron.process_group_manager import setup_process_group_manager
 
 
@@ -88,10 +88,11 @@ def shutdown_distributed() -> None:
         dist.destroy_process_group()
 
 
-def instantiate_model(model_cfg: AutoConfig) -> Llama:
+def instantiate_model(model_cfg: AutoConfig):
     os.environ.setdefault("DEVICE", "cpu")
     os.environ.setdefault("FLASH_ATTEN", "0")
-    model = Llama(config=model_cfg)
+    model_cls = Qwen3Model if getattr(model_cfg, "model_type", "") == "qwen3" else Llama
+    model = model_cls(config=model_cfg)
     model.eval()
     return model
 
@@ -115,10 +116,12 @@ def picotron_to_hf_key(key: str) -> str:
     key = key.replace("final_proj.", "lm_head.")
     key = key.replace("attention.", "self_attn.")
     key = key.replace("out_proj", "o_proj")
+    key = key.replace("q_norm.", "q_norm.")
+    key = key.replace("k_norm.", "k_norm.")
     return key
 
 
-def convert_state_dict_to_hf(model: Llama) -> dict:
+def convert_state_dict_to_hf(model: torch.nn.Module) -> dict:
     picotron_state = model.state_dict()
     hf_state = {}
     for key, tensor in picotron_state.items():

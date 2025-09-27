@@ -12,7 +12,6 @@ import argparse
 import math
 import torch.nn.functional as F
 import torch, torch.distributed as dist
-from torch.optim import AdamW
 from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel
@@ -24,12 +23,12 @@ from picotron.data import MicroBatchDataLoader, NpyTokenDataset
 from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from picotron.data_parallel.data_parallel import DataParallelBucket
-from picotron.model import Llama
+from picotron.model import Llama, Qwen3Model
 from picotron.utils import download_model
-import wandb
-
+from picotron.optim import create_optimizer, OptimizerConfig, DEFAULT_NS_COEFFICIENTS, DEFAULT_NS_STEPS
 import gc
 import torch
+import wandb
 
 def train_step(model, data_loader, device):
     acc_loss = 0.0
@@ -268,7 +267,8 @@ if __name__ == "__main__":
     start_time = time.time()
 
     with init_model_with_dematerialized_weights():
-        model = Llama(config=model_config)
+        model_cls = Qwen3Model if getattr(model_config, "model_type", "") == "qwen3" else Llama
+        model = model_cls(config=model_config)
 
         if pgm.process_group_manager.tp_world_size > 1:
             model = apply_tensor_parallel(model)
@@ -310,7 +310,39 @@ if __name__ == "__main__":
         use_fused = fused_available and device == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
 
-    optimizer = AdamW(model.parameters(), lr=config["training"]["learning_rate"], **extra_args)
+    def build_optimizer_config(training_cfg):
+        optimizer_cfg = training_cfg.get("optimizer", {}) or {}
+
+        def _maybe_tuple(name):
+            value = optimizer_cfg.get(name)
+            if value is None:
+                return None
+            if isinstance(value, (list, tuple)):
+                return tuple(value)
+            return value
+
+        ns_coefficients = _maybe_tuple("ns_coefficients") or DEFAULT_NS_COEFFICIENTS
+
+        return OptimizerConfig(
+            name=optimizer_cfg.get("name", "adamw"),
+            learning_rate=training_cfg["learning_rate"],
+            weight_decay=optimizer_cfg.get("weight_decay", training_cfg.get("weight_decay", 0.0)),
+            betas=_maybe_tuple("betas"),
+            eps=optimizer_cfg.get("eps"),
+            momentum=optimizer_cfg.get("momentum", 0.95),
+            nesterov=optimizer_cfg.get("nesterov", True),
+            ns_coefficients=ns_coefficients,
+            ns_steps=optimizer_cfg.get("ns_steps", DEFAULT_NS_STEPS),
+            adjust_lr_fn=optimizer_cfg.get("adjust_lr_fn"),
+            muon_weight_decay=optimizer_cfg.get("muon_weight_decay"),
+            muon_momentum=optimizer_cfg.get("muon_momentum"),
+            muon_adjust_lr_fn=optimizer_cfg.get("muon_adjust_lr_fn"),
+            muon_eps=optimizer_cfg.get("muon_eps"),
+        )
+
+    optimizer_config = build_optimizer_config(config["training"])
+    adam_kwargs = extra_args if extra_args else None
+    optimizer = create_optimizer(model, optimizer_config, adam_extra_kwargs=adam_kwargs)
     
     checkpoint_manager = CheckpointManager()
 

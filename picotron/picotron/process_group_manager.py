@@ -66,3 +66,21 @@ class ProcessGroupManager:
 def setup_process_group_manager(tp_size, cp_size, pp_size, dp_size):
     global process_group_manager
     process_group_manager = ProcessGroupManager(tp_size, cp_size, pp_size, dp_size)
+
+
+class DummyProcessGroupManager:
+    def __init__(self):
+        self.tp_world_size = 1
+        self.cp_world_size = 1
+        self.pp_world_size = 1
+        self.dp_world_size = 1
+        self.cp_dp_world_size = 1
+        self.tp_rank = 0
+        self.cp_rank = 0
+        self.dp_rank = 0
+        self.pp_rank = 0
+        self.pp_is_first_stage = True
+        self.pp_is_last_stage = True
+
+
+process_group_manager = DummyProcessGroupManager()
