@@ -3,6 +3,7 @@ CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 4 --master_addr localhos
 CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --config tmp/dummy/llama2_7b_benchmark.json
 """
 import os
+import copy
 import inspect
 import json
 import time
@@ -26,6 +27,9 @@ from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
 from picotron.utils import download_model
 import wandb
+
+import gc
+import torch
 
 def train_step(model, data_loader, device):
     acc_loss = 0.0
@@ -54,6 +58,22 @@ def train_step(model, data_loader, device):
         acc_loss += loss.item()
 
     return acc_loss
+
+
+def compute_grad_norm(parameters, norm_type=2.0):
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+
+    grads = []
+    for param in parameters:
+        if param.grad is not None:
+            grads.append(param.grad.detach().norm(norm_type))
+
+    if not grads:
+        return None
+
+    stacked = torch.stack(grads)
+    return torch.norm(stacked, norm_type)
 
 
 class WarmupStableDecayScheduler:
@@ -197,23 +217,30 @@ if __name__ == "__main__":
         print("Tokens per step:", to_readable_format(tokens_per_step), is_print_rank=is_wandb_rank)
 
     if is_wandb_rank and config["logging"]["use_wandb"]:
-        wandb.init(
-            project="chess-v2",
-            name=f"{config['logging']['run_name']}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}",
-            config={
+        wandb_config = copy.deepcopy(config)
+        env_cfg = wandb_config.get("environment")
+        if isinstance(env_cfg, dict) and "HF_TOKEN" in env_cfg:
+            env_cfg["HF_TOKEN"] = "***redacted***"
+        wandb_config.setdefault("runtime", {})
+        wandb_config["runtime"].update(
+            {
                 "tensor_parallel_size": pgm.process_group_manager.tp_world_size,
                 "context_parallel_size": pgm.process_group_manager.cp_world_size,
                 "pipeline_parallel_size": pgm.process_group_manager.pp_world_size,
                 "data_parallel_size": pgm.process_group_manager.dp_world_size,
-                "model": config["model"]["name"],
-                "dataset": config["dataset"]["name"],
-                "max_tokens": config["training"]["max_tokens"],
-                "learning_rate": config["training"]["learning_rate"],
-                "seed": config["training"]["seed"],
-                "micro_batch_size": data_loader.micro_batch_size,
                 "global_batch_size": data_loader.global_batch_size,
+                "micro_batch_size": data_loader.micro_batch_size,
                 "gradient_accumulation": data_loader.grad_acc_steps,
-            },
+                "tokens_per_step": tokens_per_step,
+                "device": str(device),
+                "dtype": str(dtype),
+            }
+        )
+
+        wandb.init(
+            project=config["logging"].get("project_name", "chess-v2"),
+            name=f"{config['logging']['run_name']}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}",
+            config=wandb_config,
         )
 
     if pgm.process_group_manager.global_rank == 0:
@@ -292,8 +319,12 @@ if __name__ == "__main__":
         step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, config["checkpoint"]["load_path"])
     
     dist.barrier()
+    gc.collect()
+    torch.cuda.empty_cache()
     
     lr_scheduler = build_lr_scheduler(optimizer, config["training"])
+
+    grad_clip_norm = config["training"].get("grad_clip_norm")
 
     while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
         step_start_time = time.time()
@@ -310,6 +341,12 @@ if __name__ == "__main__":
             loss = train_step(model, data_loader, device)
             
         loss = average_loss_across_dp_cp_ranks(loss, device)
+
+        grad_norm_pre_clip_tensor = compute_grad_norm(model.parameters())
+        grad_norm_pre_clip = grad_norm_pre_clip_tensor.item() if grad_norm_pre_clip_tensor is not None else None
+
+        if grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         
         optimizer.step()
         if lr_scheduler is not None:
@@ -328,6 +365,8 @@ if __name__ == "__main__":
         mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config)
         
         if is_wandb_rank:
+            grad_norm_display_value = grad_norm_pre_clip
+            grad_norm_display = f"{grad_norm_display_value:6.2f}" if grad_norm_display_value is not None else "   n/a"
             print(
                 f"[rank {pgm.process_group_manager.global_rank}] "
                 f"Step: {step:<5d} | "
@@ -335,24 +374,26 @@ if __name__ == "__main__":
                 f"LR: {lr:.3e} | "
                 f"Global batch size: {to_readable_format(tokens_per_step):>7s} | "
                 f"Tokens/s: {to_readable_format(tokens_per_second):>7s} | "
-                f"Tokens/s/GPU: {to_readable_format(tokens_per_second_per_gpu):>7s} | "
                 f"Tokens: {to_readable_format(trained_tokens):>7s}{('/' + to_readable_format(config['training']['max_tokens'])) if config['training']['max_tokens'] else ''} | "
+                f"GradNorm: {grad_norm_display} | "
                 f"MFU: {mfu:5.2f}% | "
                 f"Memory usage: {torch.cuda.memory_reserved() / 1e9:6.2f}GB",
                 is_print_rank=is_wandb_rank
             )
         
-            if config["logging"]["use_wandb"]:
-                wandb.log({
-                    "loss": loss,
-                    "lr": lr,
-                    "tokens_per_step": tokens_per_step,
-                    "tokens_per_second": tokens_per_step / step_duration,
-                    "mfu": mfu,
-                    "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
-                    "memory_usage": torch.cuda.memory_reserved() / 1e9,
-                    "trained_tokens": trained_tokens
-                })
+        if is_wandb_rank and config["logging"]["use_wandb"]:
+            log_payload = {
+                "loss": loss,
+                "lr": lr,
+                "tokens_per_step": tokens_per_step,
+                "tokens_per_second": tokens_per_step / step_duration,
+                "mfu": mfu,
+                "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
+                "memory_usage": torch.cuda.memory_reserved() / 1e9,
+                "trained_tokens": trained_tokens,
+                "grad_norm_pre_clip": grad_norm_pre_clip,
+                "step": step,
+            }
         
         if step % config["checkpoint"]["save_frequency"] == 0:
             checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config["checkpoint"]["save_dir"]+f"/{step}")
@@ -381,9 +422,12 @@ if __name__ == "__main__":
                         val_loss = F.cross_entropy(logits, targets, reduction='mean')
                         val_loss = average_loss_across_dp_cp_ranks(val_loss, device)
                         if is_wandb_rank and config["logging"]["use_wandb"]:
-                            wandb.log({"val_loss": val_loss, "step": step, "trained_tokens": trained_tokens})
+                            log_payload = log_payload | {"val_loss": val_loss, "trained_tokens": trained_tokens}
             model.train()
         
+        if is_wandb_rank and config["logging"]["use_wandb"]:
+            wandb.log(log_payload, step=step)
+
         if step >= config["training"]["total_train_steps"]:
             break
     

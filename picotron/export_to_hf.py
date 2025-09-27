@@ -140,7 +140,7 @@ def save_hf_artifacts(
     save_file(hf_state, out_path / "model.safetensors")
 
     # Persist config.json using transformers serializer
-    model_cfg.torch_dtype = dtype
+    model_cfg.dtype = dtype
     model_cfg.save_pretrained(out_path)
 
     if tokenizer_dir is not None:
