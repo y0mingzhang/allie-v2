@@ -22,7 +22,7 @@ export HF_XET_CACHE=/scratch/yimingz3/hf_cache/xet
 # Env vars with sensible defaults
 REPO_ROOT=${REPO_ROOT:-/home/yimingz3/src/chess-v2}
 LIST_FILE=${LIST_FILE:-$REPO_ROOT/data/filtered_parquets_shuffled.txt}
-OUT_BASE=${OUT_BASE:-$REPO_ROOT/data/bin_npy}
+OUT_BASE=${OUT_BASE:-$REPO_ROOT/data/tokens}
 
 mkdir -p "$REPO_ROOT/logs/prepare" "$OUT_BASE"
 

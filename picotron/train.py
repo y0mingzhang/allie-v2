@@ -18,7 +18,7 @@ import picotron.process_group_manager as pgm
 from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params
 from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
-from picotron.data import MicroBatchDataLoader
+from picotron.data import MicroBatchDataLoader, NpyTokenDataset
 from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from picotron.data_parallel.data_parallel import DataParallelBucket
@@ -103,15 +103,29 @@ if __name__ == "__main__":
     set_all_seed(config["training"]["seed"])
 
     start_time = time.time()
+    # Train loader (supports glob patterns or directory)
     data_loader = MicroBatchDataLoader(
         micro_batch_size=config["training"]["micro_batch_size"],
         seq_length=config["training"]["seq_length"],
-        npy_path=config["dataset"]["npy_path"],
+        npy_path=config["dataset"]["train_glob"],
         grad_acc_steps=config["training"]["gradient_accumulation_steps"],
         device=device,
         num_workers=config["dataset"]["num_workers"],
         num_samples=config["training"].get("num_samples", None),
     )
+
+    # Optional validation dataset: run one pass per eval step
+    val_dataset = None
+    if config["dataset"].get("val_glob"):
+        try:
+            val_dataset = NpyTokenDataset(
+                npy_glob_or_path=config["dataset"]["val_glob"],
+                seq_length=config["training"]["seq_length"],
+                num_samples=config["validation"].get("num_samples", None) if "validation" in config else None,
+            )
+        except Exception as e:
+            if pgm.process_group_manager.global_rank == 0:
+                print(f"Warning: could not initialize validation dataset: {e}", is_print_rank=True)
 
     # download model on the first rank, assume all ranks have access to the same filesystem
     if pgm.process_group_manager.global_rank == 0:
@@ -267,6 +281,31 @@ if __name__ == "__main__":
         
         if step % config["checkpoint"]["save_frequency"] == 0:
             checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config["checkpoint"]["save_dir"]+f"/{step}")
+
+        # Validation loop (optional)
+        if val_dataset is not None and step % config.get("validation", {}).get("every_steps", 1000) == 0:
+            model.eval()
+            with torch.no_grad():
+                # Evaluate on as many sequences as fit in one global batch
+                eval_seq = min(len(val_dataset), data_loader.global_batch_size)
+                if eval_seq > 0:
+                    # Build a small batch on this rank only
+                    start = 0
+                    end = min(eval_seq, data_loader.micro_batch_size)
+                    batch_tokens = []
+                    for i in range(start, end):
+                        batch_tokens.append(torch.tensor(val_dataset[i]["input_ids"]))
+                    if batch_tokens:
+                        batch_input_ids = torch.stack(batch_tokens).to(device)
+                        outputs = model(input_ids=batch_input_ids)
+                        bs, sl = batch_input_ids.shape
+                        targets = batch_input_ids.reshape(-1)[1:bs*sl]
+                        logits = outputs.view(sl*bs, -1)[:-1]
+                        val_loss = F.cross_entropy(logits, targets, reduction='mean')
+                        val_loss = average_loss_across_dp_cp_ranks(val_loss, device)
+                        if is_wandb_rank and config["logging"]["use_wandb"]:
+                            wandb.log({"val_loss": val_loss.item(), "step": step, "trained_tokens": trained_tokens})
+            model.train()
         
         if step >= config["training"]["total_train_steps"]:
             break
