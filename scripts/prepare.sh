@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name="prepare-v2"
+#SBATCH --job-name="prepare-npy"
 #SBATCH --partition="array"
 #SBATCH --qos="array_qos"
 #SBATCH --requeue
@@ -22,8 +22,9 @@ export HF_XET_CACHE=/scratch/yimingz3/hf_cache/xet
 # Env vars with sensible defaults
 REPO_ROOT=${REPO_ROOT:-/home/yimingz3/src/chess-v2}
 LIST_FILE=${LIST_FILE:-$REPO_ROOT/data/filtered_parquets_shuffled.txt}
+OUT_BASE=${OUT_BASE:-$REPO_ROOT/data/bin_npy}
 
-mkdir -p "$REPO_ROOT/logs/prepare" "$REPO_ROOT/data/bin"
+mkdir -p "$REPO_ROOT/logs/prepare" "$OUT_BASE"
 
 echo "Preparing with 100-way sharding over: $LIST_FILE"
 
@@ -48,10 +49,15 @@ if [ "$end" -gt "$TOTAL" ]; then end="$TOTAL"; fi
 
 echo "Task $SLURM_ARRAY_TASK_ID: processing lines ${start}-${end} of $TOTAL (chunk=$CHUNK)"
 
-srun python -u "$REPO_ROOT/src/data/prepare_v2.py" \
+# Unique output dir per slice to avoid collisions
+OUT_DIR="$OUT_BASE/$(printf '%07d-%07d' "$start" "$end")"
+mkdir -p "$OUT_DIR"
+
+srun python -u "$REPO_ROOT/src/data/prepare_npy.py" \
   --list-file "$LIST_FILE" \
   --start "$start" \
   --end "$end" \
-  --output-prefix "$REPO_ROOT/data/bin/0924"
+  --out-dir "$OUT_DIR" \
+  --progress
 
 
