@@ -30,6 +30,7 @@ dependencies = [
     "regex>=2025.9.18",
     "seaborn>=0.13.2",
     "torch>=2.8.0",
+    "wheel>=0.45.1",
 ]
 
 [project.urls]

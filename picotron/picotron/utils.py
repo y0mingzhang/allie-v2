@@ -35,7 +35,7 @@ def to_readable_format(num, precision=2):
 # ref: 
 # https://github.com/karpathy/nanoGPT/blob/9755682b981a45507f6eb9b11eadef8cb83cebd5/model.py#L289
 # https://github.com/stanford-cs336/spring2024-lectures/blob/main/lecture_02.py#L950
-def get_mfu(tokens_per_second, num_params, model_config, theoretical_flops = 181e12):
+def get_mfu(tokens_per_second, num_params, model_config, theoretical_flops = 989.5e12):
     num_layers = model_config.num_hidden_layers
     hidden_dim = model_config.hidden_size
     seq_len = model_config.max_position_embeddings

@@ -25,7 +25,10 @@
         "micro_batch_size": 32,
         "gradient_accumulation_steps": 1,
         "num_samples": 400000,
-        "max_tokens": null
+        "max_tokens": null,
+        "torch_compile": false,
+        "torch_compile_mode": "default",
+        "torch_compile_fullgraph": false
     },
     "dataset": {
         "name": "roneneldan/TinyStories",

@@ -8,6 +8,7 @@ import json
 import time
 import datetime
 import argparse
+import math
 import torch.nn.functional as F
 import torch, torch.distributed as dist
 from torch.optim import AdamW
@@ -53,6 +54,62 @@ def train_step(model, data_loader, device):
         acc_loss += loss.item()
 
     return acc_loss
+
+
+class WarmupStableDecayScheduler:
+    def __init__(self, optimizer, base_lr, schedule_cfg):
+        self.optimizer = optimizer
+        self.max_lr = schedule_cfg.get("max_lr", base_lr)
+        self.min_lr = schedule_cfg.get("min_lr", 0.0)
+        self.warmup_steps = schedule_cfg.get("warmup_steps", 0)
+        self.stable_steps = schedule_cfg.get("stable_steps", 0)
+        self.decay_steps = schedule_cfg.get("decay_steps", 0)
+
+        if self.decay_steps < 0 or self.warmup_steps < 0 or self.stable_steps < 0:
+            raise ValueError("Warmup, stable, and decay steps must be non-negative")
+
+        self.total_schedule_steps = self.warmup_steps + self.stable_steps + self.decay_steps
+        self.step(0)
+
+    def _set_lr(self, lr):
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+
+    def _compute_lr(self, step):
+        if self.total_schedule_steps == 0:
+            return self.max_lr
+
+        if step <= 0:
+            return 0.0 if self.warmup_steps > 0 else self.max_lr
+
+        if step < self.warmup_steps:
+            scale = step / max(1, self.warmup_steps)
+            return self.max_lr * scale
+
+        stable_end = self.warmup_steps + self.stable_steps
+        if step < stable_end or self.decay_steps == 0:
+            return self.max_lr
+
+        decay_progress = min(1.0, (step - stable_end) / max(1, self.decay_steps))
+        cosine = 0.5 * (1 + math.cos(math.pi * decay_progress))
+        return self.min_lr + (self.max_lr - self.min_lr) * cosine
+
+    def step(self, step):
+        lr = self._compute_lr(step)
+        self._set_lr(lr)
+        return lr
+
+
+def build_lr_scheduler(optimizer, training_cfg):
+    schedule_cfg = training_cfg.get("lr_schedule")
+    if not schedule_cfg:
+        return None
+
+    schedule_type = schedule_cfg.get("type", "").lower()
+    if schedule_type != "warmup_stable_decay":
+        raise ValueError(f"Unsupported lr_schedule type: {schedule_type}")
+
+    return WarmupStableDecayScheduler(optimizer, training_cfg["learning_rate"], schedule_cfg)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -141,7 +198,7 @@ if __name__ == "__main__":
 
     if is_wandb_rank and config["logging"]["use_wandb"]:
         wandb.init(
-            project="picotron",
+            project="chess-v2",
             name=f"{config['logging']['run_name']}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}",
             config={
                 "tensor_parallel_size": pgm.process_group_manager.tp_world_size,
@@ -166,6 +223,8 @@ if __name__ == "__main__":
         model_config.num_hidden_layers = model_config.num_hidden_layers if "num_hidden_layers" not in config["model"] else config["model"]["num_hidden_layers"]
         model_config.num_attention_heads = model_config.num_attention_heads if "num_attention_heads" not in config["model"] else config["model"]["num_attention_heads"]
         model_config.num_key_value_heads = model_config.num_key_value_heads if "num_key_value_heads" not in config["model"] else config["model"]["num_key_value_heads"]
+        if "vocab_size" in config["model"] and config["model"]["vocab_size"] is not None:
+            model_config.vocab_size = config["model"]["vocab_size"]
         model_config.max_position_embeddings = config["training"]["seq_length"]
         objects = [model_config]
     else:
@@ -198,6 +257,14 @@ if __name__ == "__main__":
         model = apply_context_parallel(model)
 
     model.to(dtype).to(device)
+
+    compile_cfg = config["training"]
+    if compile_cfg.get("torch_compile", False):
+        if not hasattr(torch, "compile"):
+            if pgm.process_group_manager.global_rank == 0:
+                print("Warning: torch.compile is not available in this PyTorch build; skipping compilation.", is_print_rank=True)
+        else:
+            model = torch.compile(model)
     
     if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallelBucket(model)
@@ -226,6 +293,8 @@ if __name__ == "__main__":
     
     dist.barrier()
     
+    lr_scheduler = build_lr_scheduler(optimizer, config["training"])
+
     while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
         step_start_time = time.time()
         optimizer.zero_grad()
@@ -243,6 +312,10 @@ if __name__ == "__main__":
         loss = average_loss_across_dp_cp_ranks(loss, device)
         
         optimizer.step()
+        if lr_scheduler is not None:
+            lr = lr_scheduler.step(step + 1)
+        else:
+            lr = optimizer.param_groups[0]["lr"]
         trained_tokens += tokens_per_step
         step += 1
         
@@ -259,6 +332,7 @@ if __name__ == "__main__":
                 f"[rank {pgm.process_group_manager.global_rank}] "
                 f"Step: {step:<5d} | "
                 f"Loss: {loss:6.4f} | "
+                f"LR: {lr:.3e} | "
                 f"Global batch size: {to_readable_format(tokens_per_step):>7s} | "
                 f"Tokens/s: {to_readable_format(tokens_per_second):>7s} | "
                 f"Tokens/s/GPU: {to_readable_format(tokens_per_second_per_gpu):>7s} | "
@@ -271,6 +345,7 @@ if __name__ == "__main__":
             if config["logging"]["use_wandb"]:
                 wandb.log({
                     "loss": loss,
+                    "lr": lr,
                     "tokens_per_step": tokens_per_step,
                     "tokens_per_second": tokens_per_step / step_duration,
                     "mfu": mfu,
@@ -297,14 +372,16 @@ if __name__ == "__main__":
                         batch_tokens.append(torch.tensor(val_dataset[i]["input_ids"]))
                     if batch_tokens:
                         batch_input_ids = torch.stack(batch_tokens).to(device)
-                        outputs = model(input_ids=batch_input_ids)
-                        bs, sl = batch_input_ids.shape
-                        targets = batch_input_ids.reshape(-1)[1:bs*sl]
-                        logits = outputs.view(sl*bs, -1)[:-1]
+                        inputs = batch_input_ids[:, :-1]
+                        targets = batch_input_ids[:, 1:]
+                        outputs = model(input_ids=inputs)
+                        bs, sl = inputs.shape
+                        logits = outputs.view(bs * sl, -1)
+                        targets = targets.reshape(-1)
                         val_loss = F.cross_entropy(logits, targets, reduction='mean')
                         val_loss = average_loss_across_dp_cp_ranks(val_loss, device)
                         if is_wandb_rank and config["logging"]["use_wandb"]:
-                            wandb.log({"val_loss": val_loss.item(), "step": step, "trained_tokens": trained_tokens})
+                            wandb.log({"val_loss": val_loss, "step": step, "trained_tokens": trained_tokens})
             model.train()
         
         if step >= config["training"]["total_train_steps"]:
