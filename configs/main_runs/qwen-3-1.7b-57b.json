@@ -4,7 +4,6 @@
         "cp_size": 1,
         "pp_size": 1,
         "dp_size": 8,
-        "pp_engine": "1f1b",
         "backend": "nccl",
         "use_cpu": false
     },
@@ -13,14 +12,14 @@
         "use_flash_attention": true,
         "use_fused_adam": true,
         "vocab_size": 2350,
-        "max_position_embeddings": 1024
+        "max_position_embeddings": 512
     },
     "training": {
         "seed": 42,
         "learning_rate": 5e-4,
-        "total_train_steps": 108800,
-        "seq_length": 1024,
-        "micro_batch_size": 32,
+        "total_train_steps": 72500,
+        "seq_length": 2048,
+        "micro_batch_size": 24,
         "gradient_accumulation_steps": 2,
         "max_tokens": null,
         "grad_clip_norm": 1.5,
@@ -36,9 +35,9 @@
         },
         "lr_schedule": {
             "type": "warmup_stable_decay",
-            "warmup_steps": 100,
-            "stable_steps": 97820,
-            "decay_steps": 10880,
+            "warmup_steps": 200,
+            "stable_steps": 65050,
+            "decay_steps": 7250,
             "max_lr": 5e-4,
             "min_lr": 2.5e-5
         }
@@ -50,12 +49,12 @@
         "num_workers": 4
     },
     "validation": {
-        "every_steps": 1360,
+        "every_steps": 725,
         "num_samples": 4096
     },
     "checkpoint": {
         "save_dir": "models/main_runs/qwen-3-1.7b-57b",
-        "save_frequency": 5440,
+        "save_frequency": 3625,
         "load_path": ""
     },
     "logging": {
@@ -64,7 +63,7 @@
         "run_name": "main_runs/qwen-3-1.7b-57b"
     },
     "environment": {
-        "OMP_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "2",
         "TOKENIZERS_PARALLELISM": "false",
         "FLASH_ATTEN": "1"
     }
