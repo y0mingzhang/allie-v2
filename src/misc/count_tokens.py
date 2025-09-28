@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
+from collections.abc import Iterable
 import glob
 import os
 import sys
-from typing import Iterable, List
 
 from megatron.core.datasets.indexed_dataset import IndexedDataset
 
 
-def iter_prefixes(inputs: List[str]) -> Iterable[str]:
+def iter_prefixes(inputs: list[str]) -> Iterable[str]:
     for inp in inputs:
         # If a list file is provided
         if os.path.isfile(inp) and inp.endswith(".txt"):
-            with open(inp, "r", encoding="utf-8") as f:
+            with open(inp, encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
                 for line in lines:
                     yield from iter_prefixes([line])
@@ -61,7 +61,9 @@ def count_tokens(prefixes: Iterable[str]) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Count tokens across Megatron indexed dataset prefixes")
+    parser = argparse.ArgumentParser(
+        description="Count tokens across Megatron indexed dataset prefixes"
+    )
     parser.add_argument(
         "inputs",
         nargs="+",
@@ -89,5 +91,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

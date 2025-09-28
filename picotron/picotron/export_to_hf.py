@@ -23,12 +23,117 @@ import argparse
 import json
 import os
 import shutil
+import sys
+import types
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from safetensors.torch import save_file
 from transformers import AutoConfig
+
+os.environ.setdefault("DEVICE", "cpu")
+os.environ.setdefault("FLASH_ATTEN", "0")
+os.environ.setdefault("CONTEXT_PARALLEL", "0")
+
+
+def _ensure_flash_attn_stub() -> None:
+    try:
+        import flash_attn.flash_attn_interface  # type: ignore
+        import flash_attn.layers.rotary  # type: ignore
+        import flash_attn.ops.triton.layer_norm  # type: ignore
+        return
+    except Exception:
+        pass
+
+    for module_name in (
+        "flash_attn",
+        "flash_attn.flash_attn_interface",
+        "flash_attn.layers",
+        "flash_attn.layers.rotary",
+        "flash_attn.ops",
+        "flash_attn.ops.triton",
+        "flash_attn.ops.triton.layer_norm",
+    ):
+        sys.modules.pop(module_name, None)
+
+    flash_attn_root = types.ModuleType("flash_attn")
+    interface_module = types.ModuleType("flash_attn.flash_attn_interface")
+    rotary_module = types.ModuleType("flash_attn.layers.rotary")
+    layer_norm_module = types.ModuleType("flash_attn.ops.triton.layer_norm")
+
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+
+    def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
+        if interleaved:
+            raise NotImplementedError("Interleaved rotary embedding not supported in CPU stub")
+        cos = cos.to(dtype=x.dtype, device=x.device)
+        sin = sin.to(dtype=x.dtype, device=x.device)
+        while cos.dim() < x.dim():
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+        return (x * cos) + (_rotate_half(x) * sin)
+
+    def _flash_attn_func(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = True, **_: object) -> torch.Tensor:
+        bsz, seqlen, heads, head_dim = q.shape
+        q_flat = q.permute(0, 2, 1, 3).reshape(bsz * heads, seqlen, head_dim)
+        k_flat = k.permute(0, 2, 1, 3).reshape(bsz * heads, seqlen, head_dim)
+        v_flat = v.permute(0, 2, 1, 3).reshape(bsz * heads, seqlen, head_dim)
+        out = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, attn_mask=None, dropout_p=0.0, is_causal=causal)
+        out = out.reshape(bsz, heads, seqlen, head_dim).permute(0, 2, 1, 3)
+        return out
+
+    def _layer_norm_fn(
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        residual: torch.Tensor | None = None,
+        eps: float = 1e-5,
+        dropout_p: float = 0.0,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+        is_rms_norm: bool = False,
+        return_dropout_mask: bool = False,
+        **_: object,
+    ) -> torch.Tensor | tuple[torch.Tensor, None]:
+        if residual is not None:
+            hidden_states = hidden_states + residual
+        working = hidden_states.float()
+        if is_rms_norm:
+            variance = working.pow(2).mean(dim=-1, keepdim=True)
+            working = working * torch.rsqrt(variance + eps)
+        else:
+            mean = working.mean(dim=-1, keepdim=True)
+            variance = working.var(dim=-1, unbiased=False, keepdim=True)
+            working = (working - mean) * torch.rsqrt(variance + eps)
+        out = (weight * working.to(weight.dtype)).to(hidden_states.dtype)
+        if bias is not None:
+            out = out + bias.to(out.dtype)
+        if return_dropout_mask:
+            return out, None
+        return out
+
+    interface_module.flash_attn_func = _flash_attn_func
+    rotary_module.apply_rotary_emb = _apply_rotary_emb
+    layer_norm_module.layer_norm_fn = _layer_norm_fn
+
+    flash_attn_root.flash_attn_interface = interface_module
+    flash_attn_root.layers = types.SimpleNamespace(rotary=rotary_module)
+    flash_attn_root.ops = types.SimpleNamespace(triton=types.SimpleNamespace(layer_norm=layer_norm_module))
+
+    sys.modules["flash_attn"] = flash_attn_root
+    sys.modules["flash_attn.flash_attn_interface"] = interface_module
+    sys.modules["flash_attn.layers"] = types.SimpleNamespace(rotary=rotary_module)
+    sys.modules["flash_attn.layers.rotary"] = rotary_module
+    sys.modules["flash_attn.ops"] = types.SimpleNamespace(triton=types.SimpleNamespace(layer_norm=layer_norm_module))
+    sys.modules["flash_attn.ops.triton"] = types.SimpleNamespace(layer_norm=layer_norm_module)
+    sys.modules["flash_attn.ops.triton.layer_norm"] = layer_norm_module
+
+
+_ensure_flash_attn_stub()
 
 from picotron.model import Llama, Qwen3Model
 from picotron.process_group_manager import setup_process_group_manager
@@ -49,21 +154,55 @@ def load_training_config(path: str) -> dict:
         return json.load(f)
 
 
-def build_model_config(config_dict: dict) -> AutoConfig:
-    model_cfg = AutoConfig.from_pretrained(config_dict["model"]["name"])
+def _get_base_model_name(model_section: dict) -> str:
+    return model_section.get("hf_base", model_section.get("name"))
 
-    overrides = config_dict["model"]
-    if "num_hidden_layers" in overrides:
-        model_cfg.num_hidden_layers = overrides["num_hidden_layers"]
-    if "num_attention_heads" in overrides:
-        model_cfg.num_attention_heads = overrides["num_attention_heads"]
-    if "num_key_value_heads" in overrides:
-        model_cfg.num_key_value_heads = overrides["num_key_value_heads"]
+
+def _apply_model_overrides(model_cfg: AutoConfig, overrides: dict, train_cfg: dict) -> None:
+    simple_overrides = (
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "hidden_size",
+        "intermediate_size",
+        "rope_theta",
+        "rms_norm_eps",
+        "layer_types",
+        "head_dim",
+        "attention_bias",
+        "attention_dropout",
+        "use_sliding_window",
+        "sliding_window",
+        "max_window_layers",
+        "initializer_range",
+    )
+    for key in simple_overrides:
+        if key in overrides and overrides[key] is not None:
+            setattr(model_cfg, key, overrides[key])
+
     if overrides.get("vocab_size") is not None:
         model_cfg.vocab_size = overrides["vocab_size"]
 
-    train_cfg = config_dict["training"]
-    model_cfg.max_position_embeddings = train_cfg["seq_length"]
+    if overrides.get("tie_word_embeddings") is not None:
+        model_cfg.tie_word_embeddings = overrides["tie_word_embeddings"]
+    elif getattr(model_cfg, "model_type", "") in {"qwen", "qwen2", "qwen3"}:
+        # Picotron checkpoints do not tie embeddings by construction.
+        model_cfg.tie_word_embeddings = False
+
+    max_pos = overrides.get("max_position_embeddings")
+    if max_pos is None:
+        max_pos = train_cfg.get("seq_length", getattr(model_cfg, "max_position_embeddings", None))
+    if max_pos is not None:
+        model_cfg.max_position_embeddings = max_pos
+
+
+def build_model_config(config_dict: dict) -> AutoConfig:
+    model_section = config_dict["model"]
+    train_section = config_dict.get("training", {})
+
+    model_cfg = AutoConfig.from_pretrained(_get_base_model_name(model_section))
+
+    _apply_model_overrides(model_cfg, model_section, train_section)
 
     return model_cfg
 
@@ -79,6 +218,8 @@ def init_distributed() -> None:
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
     os.environ.setdefault("LOCAL_RANK", "0")
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
     if not dist.is_initialized():
         dist.init_process_group("gloo", rank=0, world_size=1)
 
@@ -91,7 +232,13 @@ def shutdown_distributed() -> None:
 def instantiate_model(model_cfg: AutoConfig):
     os.environ.setdefault("DEVICE", "cpu")
     os.environ.setdefault("FLASH_ATTEN", "0")
-    model_cls = Qwen3Model if getattr(model_cfg, "model_type", "") == "qwen3" else Llama
+    model_type = getattr(model_cfg, "model_type", "")
+    if model_type == "qwen3":
+        model_cls = Qwen3Model
+    elif model_type in {"llama", "llama2", "llama3"}:
+        model_cls = Llama
+    else:
+        raise ValueError(f"Unsupported model type for export: {model_type!r}")
     model = model_cls(config=model_cfg)
     model.eval()
     return model
@@ -149,7 +296,9 @@ def save_hf_artifacts(
     if tokenizer_dir is not None:
         tok_src = Path(tokenizer_dir)
         if not tok_src.exists() or not tok_src.is_dir():
-            raise ValueError(f"Tokenizer directory '{tokenizer_dir}' does not exist or is not a directory")
+            raise ValueError(
+                f"Tokenizer directory '{tokenizer_dir}' does not exist or is not a directory"
+            )
         for item in tok_src.iterdir():
             dest = out_path / item.name
             if item.is_dir():

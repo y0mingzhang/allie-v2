@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
+from collections.abc import Iterable
 import logging
 import os
-from typing import Iterable
 
+from datasets import load_dataset
 import numpy as np
 from tqdm.auto import tqdm
-from datasets import load_dataset
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _read_list_file(list_file: str) -> list[str]:
     paths: list[str] = []
-    with open(list_file, "r", encoding="utf-8") as f:
+    with open(list_file, encoding="utf-8") as f:
         for raw_line in f:
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -39,7 +38,9 @@ def _iter_tokens(dataset) -> Iterable[list[int]]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Concatenate token arrays from parquet(s) and dump uint16 .npy")
+    parser = argparse.ArgumentParser(
+        description="Concatenate token arrays from parquet(s) and dump uint16 .npy"
+    )
     parser.add_argument(
         "--list-file",
         type=str,
@@ -82,7 +83,11 @@ def build_streaming_dataset(paths: list[str]):
 
 
 def concatenate_and_save_with_val_split(
-    paths: list[str], out_dir: str, show_progress: bool = False, val_prob: float = 0.0001, rng_seed: int = 12345
+    paths: list[str],
+    out_dir: str,
+    show_progress: bool = False,
+    val_prob: float = 0.0001,
+    rng_seed: int = 12345,
 ) -> None:
     # First pass: count train/val tokens deterministically
     logger.info("Counting tokens for train/val (first pass)...")
@@ -101,7 +106,12 @@ def concatenate_and_save_with_val_split(
             train_total += len(tokens)
     if train_total + val_total == 0:
         raise ValueError("No tokens found in provided parquets")
-    logger.info("Total tokens -> train: %d, val: %d (%.6f%% val)", train_total, val_total, (val_total / max(1, train_total + val_total)) * 100.0)
+    logger.info(
+        "Total tokens -> train: %d, val: %d (%.6f%% val)",
+        train_total,
+        val_total,
+        (val_total / max(1, train_total + val_total)) * 100.0,
+    )
 
     # Second pass: allocate and write
     logger.info("Concatenating into uint16 arrays (second pass)...")

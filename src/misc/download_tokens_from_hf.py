@@ -7,4 +7,3 @@ snapshot_download(
     local_dir_use_symlinks=False,
     resume_download=True,
 )
-

@@ -295,7 +295,7 @@ if __name__ == "__main__":
             if pgm.process_group_manager.global_rank == 0:
                 print("Warning: torch.compile is not available in this PyTorch build; skipping compilation.", is_print_rank=True)
         else:
-            print("compiling model...")
+            print("compiling model...", is_print_rank=is_wandb_rank)
             model = torch.compile(model)
     
     if pgm.process_group_manager.dp_world_size > 1:
