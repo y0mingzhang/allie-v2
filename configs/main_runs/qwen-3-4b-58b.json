@@ -1,0 +1,70 @@
+{
+    "distributed": {
+        "tp_size": 1,
+        "cp_size": 1,
+        "pp_size": 1,
+        "dp_size": 8,
+        "backend": "nccl",
+        "use_cpu": false
+    },
+    "model": {
+        "name": "Qwen/Qwen3-4B",
+        "use_flash_attention": true,
+        "use_fused_adam": true,
+        "vocab_size": 2350,
+        "max_position_embeddings": 1024
+    },
+    "training": {
+        "seed": 42,
+        "learning_rate": 5e-4,
+        "total_train_steps": 74000,
+        "seq_length": 1024,
+        "micro_batch_size": 24,
+        "gradient_accumulation_steps": 4,
+        "max_tokens": null,
+        "grad_clip_norm": 1.5,
+        "torch_compile": true,
+        "optimizer": {
+            "name": "muon",
+            "weight_decay": 0.05,
+            "momentum": 0.9,
+            "ns_coefficients": [3.4445, -4.775, 2.0315],
+            "ns_steps": 5,
+            "adjust_lr_fn": "match_rms_adamw",
+            "muon_eps": 1e-7
+        },
+        "lr_schedule": {
+            "type": "warmup_stable_decay",
+            "warmup_steps": 100,
+            "stable_steps": 66500,
+            "decay_steps": 7400,
+            "max_lr": 5e-4,
+            "min_lr": 2.5e-5
+        }
+    },
+    "dataset": {
+        "name": "tokens",
+        "train_glob": "data/tokens/**/train.npy",
+        "val_glob": "data/tokens/**/val.npy",
+        "num_workers": 4
+    },
+    "validation": {
+        "every_steps": 740,
+        "num_samples": 4096
+    },
+    "checkpoint": {
+        "save_dir": "models/main_runs/qwen-3-4b-58b",
+        "save_frequency": 3700,
+        "load_path": ""
+    },
+    "logging": {
+        "use_wandb": true,
+        "project_name": "chess-v2",
+        "run_name": "main_runs/qwen-3-4b-58b"
+    },
+    "environment": {
+        "OMP_NUM_THREADS": "2",
+        "TOKENIZERS_PARALLELISM": "false",
+        "FLASH_ATTEN": "1"
+    }
+}

@@ -109,7 +109,8 @@ class MicroBatchDataLoader(DataLoader):
             self.dataset,
             num_replicas=pgm.process_group_manager.dp_world_size,
             rank=pgm.process_group_manager.dp_rank,
-            shuffle=False,
+            shuffle=True,
+            seed=3249876,
         )
 
         super().__init__(
@@ -119,8 +120,6 @@ class MicroBatchDataLoader(DataLoader):
             pin_memory=pin_memory,
             num_workers=num_workers,
             sampler=self.sampler,
-            shuffle=True,
-            seed=3249876,
         )
 
     def collate_batch(self, batch):

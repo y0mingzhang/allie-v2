@@ -52,6 +52,7 @@ def init_model_with_materialized_weights(model, model_config, save_dir):
     #Initialize model with correct tensor shapes but random weights
     initialization_manager = InitializationManager(model, model_config)
     layer_names = initialization_manager.get_layer_names_in_sft_format()
+    tie_word_embeddings = initialization_manager.tie_word_embeddings
 
     # print(f"Rank {pgm.process_group_manager.global_rank} responsible for {len(layer_names)} layers")
     
@@ -94,20 +95,24 @@ def init_model_with_materialized_weights(model, model_config, save_dir):
                 tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
                 state_dict[hf_name] = tensor
 
-    # Force creation of lm_head (even if it is tie_embedding)
+    # Force creation of lm_head / final projection weights as needed
     if pgm.process_group_manager.pp_is_last_stage or not isinstance(model, PipelineParallel):
         vocab_size = model_config.vocab_size
-        if pgm.process_group_manager.tp_world_size > 1:
-            # For TP>1, the final_proj is already wrapped in ColumnParallel
-            # Just need to initialize state_dict with correct sharded size
-            vocab_per_rank = vocab_size // pgm.process_group_manager.tp_world_size
-            # Note: For ColumnParallelLinear, weight shape should be (output_size_per_partition, in_features)
-            state_dict['final_proj.weight'] = torch.zeros(vocab_per_rank, model_config.hidden_size)
+        final_proj_key = 'final_proj.weight'
+        embedding_key = 'embedding.weight'
+
+        if tie_word_embeddings:
+            if final_proj_key not in state_dict:
+                if embedding_key not in state_dict:
+                    raise RuntimeError(
+                        "Checkpoint indicates tied word embeddings but no embedding weights were provided for final projection."
+                    )
+                state_dict[final_proj_key] = state_dict[embedding_key].clone()
         else:
-            # For TP=1, create the full layer. FinalProjection expects weight shape (out_features, in_features)
-            # FinalProjection is needed so that we cann call .reset_parameters() on it
-            model.final_proj = FinalProjection(model_config.hidden_size, vocab_size, bias=False)
-            state_dict['final_proj.weight'] = torch.zeros(vocab_size, model_config.hidden_size)
+            if final_proj_key not in state_dict:
+                raise RuntimeError(
+                    "Checkpoint must provide lm_head/final_proj weights when embeddings are not tied."
+                )
 
     # Synchronize across distributed processes and load weights
     dist.barrier()
@@ -125,6 +130,11 @@ class InitializationManager:
         self.model = model
         self.model_config = model_config
         self._has_qk_norm = self._detect_qk_norm()
+        self._tie_word_embeddings = bool(getattr(self.model_config, "tie_word_embeddings", False))
+
+    @property
+    def tie_word_embeddings(self):
+        return self._tie_word_embeddings
 
     def init_model_parameters(self):
         self.model.reset_parameters()
@@ -175,10 +185,14 @@ class InitializationManager:
             if pgm.process_group_manager.pp_is_first_stage:
                 layer_names.insert(0, "model.embed_tokens.weight")
             elif pgm.process_group_manager.pp_is_last_stage:
-                layer_names.extend(["model.norm.weight", "lm_head.weight"])
+                layer_names.append("model.norm.weight")
+                if not self._tie_word_embeddings:
+                    layer_names.append("lm_head.weight")
         else:
             layer_names.insert(0, "model.embed_tokens.weight")
-            layer_names.extend(["model.norm.weight", "lm_head.weight"])
+            layer_names.append("model.norm.weight")
+            if not self._tie_word_embeddings:
+                layer_names.append("lm_head.weight")
 
         return layer_names
 
