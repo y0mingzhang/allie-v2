@@ -24,7 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-tokenizer_module = import_module("src.data.tokenizer")
+tokenizer_module = import_module("data.tokenizer")
 Tokenizer = tokenizer_module.Tokenizer
 INCREMENTS = tokenizer_module.INCREMENTS
 SECONDS_PER_SIDE = tokenizer_module.SECONDS_PER_SIDE
@@ -70,9 +70,7 @@ def build_prompt_tokens(
 
 
 def load_model(model_dir: str, torch_dtype: torch.dtype) -> AutoModelForCausalLM:
-    model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=torch_dtype)
-    if torch_dtype != torch.float32:
-        model = model.to(torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32)
     model.eval()
     return model
 
@@ -141,7 +139,9 @@ def main() -> None:
     probs, indices = torch.topk(move_probs, k=topk)
 
     print(f"Next-move distribution after {' '.join(args.moves)}")
-    for rank, (prob, idx) in enumerate(zip(probs.tolist(), indices.tolist(), strict=False), start=1):
+    for rank, (prob, idx) in enumerate(
+        zip(probs.tolist(), indices.tolist(), strict=False), start=1
+    ):
         token = move_tokens[idx]
         move = token[len("<move:") : -1]
         print(f"{rank:2d}. {move:5s} -> {prob:.4%}")

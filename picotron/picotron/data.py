@@ -119,7 +119,8 @@ class MicroBatchDataLoader(DataLoader):
             pin_memory=pin_memory,
             num_workers=num_workers,
             sampler=self.sampler,
-            shuffle=False,
+            shuffle=True,
+            seed=3249876,
         )
 
     def collate_batch(self, batch):

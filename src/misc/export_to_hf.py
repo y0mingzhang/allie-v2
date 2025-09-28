@@ -20,17 +20,18 @@ tokenizer directory is provided, its files are copied alongside the model files.
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 import json
 import os
+from pathlib import Path
 import shutil
 import sys
 import types
-from pathlib import Path
 
+from safetensors.torch import save_file
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from safetensors.torch import save_file
 from transformers import AutoConfig
 
 os.environ.setdefault("DEVICE", "cpu")
@@ -40,9 +41,7 @@ os.environ.setdefault("CONTEXT_PARALLEL", "0")
 
 def _ensure_flash_attn_stub() -> None:
     try:
-        import flash_attn.flash_attn_interface  # type: ignore
-        import flash_attn.layers.rotary  # type: ignore
-        import flash_attn.ops.triton.layer_norm  # type: ignore
+
         return
     except Exception:
         pass
@@ -67,7 +66,9 @@ def _ensure_flash_attn_stub() -> None:
         x1, x2 = torch.chunk(x, 2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
 
-    def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
+    def _apply_rotary_emb(
+        x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False
+    ) -> torch.Tensor:
         if interleaved:
             raise NotImplementedError("Interleaved rotary embedding not supported in CPU stub")
         cos = cos.to(dtype=x.dtype, device=x.device)
@@ -77,12 +78,16 @@ def _ensure_flash_attn_stub() -> None:
             sin = sin.unsqueeze(0)
         return (x * cos) + (_rotate_half(x) * sin)
 
-    def _flash_attn_func(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = True, **_: object) -> torch.Tensor:
+    def _flash_attn_func(
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = True, **_: object
+    ) -> torch.Tensor:
         bsz, seqlen, heads, head_dim = q.shape
         q_flat = q.permute(0, 2, 1, 3).reshape(bsz * heads, seqlen, head_dim)
         k_flat = k.permute(0, 2, 1, 3).reshape(bsz * heads, seqlen, head_dim)
         v_flat = v.permute(0, 2, 1, 3).reshape(bsz * heads, seqlen, head_dim)
-        out = F.scaled_dot_product_attention(q_flat, k_flat, v_flat, attn_mask=None, dropout_p=0.0, is_causal=causal)
+        out = F.scaled_dot_product_attention(
+            q_flat, k_flat, v_flat, attn_mask=None, dropout_p=0.0, is_causal=causal
+        )
         out = out.reshape(bsz, heads, seqlen, head_dim).permute(0, 2, 1, 3)
         return out
 
@@ -122,13 +127,17 @@ def _ensure_flash_attn_stub() -> None:
 
     flash_attn_root.flash_attn_interface = interface_module
     flash_attn_root.layers = types.SimpleNamespace(rotary=rotary_module)
-    flash_attn_root.ops = types.SimpleNamespace(triton=types.SimpleNamespace(layer_norm=layer_norm_module))
+    flash_attn_root.ops = types.SimpleNamespace(
+        triton=types.SimpleNamespace(layer_norm=layer_norm_module)
+    )
 
     sys.modules["flash_attn"] = flash_attn_root
     sys.modules["flash_attn.flash_attn_interface"] = interface_module
     sys.modules["flash_attn.layers"] = types.SimpleNamespace(rotary=rotary_module)
     sys.modules["flash_attn.layers.rotary"] = rotary_module
-    sys.modules["flash_attn.ops"] = types.SimpleNamespace(triton=types.SimpleNamespace(layer_norm=layer_norm_module))
+    sys.modules["flash_attn.ops"] = types.SimpleNamespace(
+        triton=types.SimpleNamespace(layer_norm=layer_norm_module)
+    )
     sys.modules["flash_attn.ops.triton"] = types.SimpleNamespace(layer_norm=layer_norm_module)
     sys.modules["flash_attn.ops.triton.layer_norm"] = layer_norm_module
 
@@ -141,16 +150,29 @@ from picotron.process_group_manager import setup_process_group_manager
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, help="Path to Picotron JSON config used for training")
-    parser.add_argument("--checkpoint", required=True, help="Path to the Picotron checkpoint (.pth) to export")
+    parser.add_argument(
+        "--config", required=True, help="Path to Picotron JSON config used for training"
+    )
+    parser.add_argument(
+        "--checkpoint", required=True, help="Path to the Picotron checkpoint (.pth) to export"
+    )
     parser.add_argument("--output-dir", required=True, help="Directory to write Hugging Face files")
-    parser.add_argument("--tokenizer-dir", default=None, help="Optional directory containing tokenizer files to copy")
-    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"], help="Torch dtype to save in config")
+    parser.add_argument(
+        "--tokenizer-dir",
+        default=None,
+        help="Optional directory containing tokenizer files to copy",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="bfloat16",
+        choices=["bfloat16", "float32"],
+        help="Torch dtype to save in config",
+    )
     return parser.parse_args()
 
 
 def load_training_config(path: str) -> dict:
-    with open(path, "r") as f:
+    with open(path) as f:
         return json.load(f)
 
 
@@ -249,6 +271,12 @@ def load_checkpoint(model: torch.nn.Module, ckpt_path: str) -> None:
     state_dict = checkpoint.get("model")
     if state_dict is None:
         raise ValueError("Checkpoint missing 'model' key. Did you pass the Picotron .pth file?")
+    if any(key.startswith("_orig_mod.") for key in state_dict.keys()):
+        prefix = "_orig_mod."
+        state_dict = OrderedDict(
+            (key[len(prefix) :], value) if key.startswith(prefix) else (key, value)
+            for key, value in state_dict.items()
+        )
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         raise ValueError(f"Model state dict missing keys: {missing}")
@@ -330,4 +358,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

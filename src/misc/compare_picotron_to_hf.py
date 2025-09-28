@@ -13,6 +13,7 @@ non-zero status code.
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -35,7 +36,19 @@ def picotron_to_hf_key(key: str) -> str:
     key = key.replace("final_proj.", "lm_head.")
     key = key.replace("attention.", "self_attn.")
     key = key.replace("out_proj", "o_proj")
+    key = key.replace("q_norm.", "q_norm.")
+    key = key.replace("k_norm.", "k_norm.")
     return key
+
+
+def strip_orig_mod_prefix(state: OrderedDict[str, torch.Tensor]) -> OrderedDict[str, torch.Tensor]:
+    if not any(key.startswith("_orig_mod.") for key in state.keys()):
+        return state
+    prefix = "_orig_mod."
+    return OrderedDict(
+        (key[len(prefix) :], value) if key.startswith(prefix) else (key, value)
+        for key, value in state.items()
+    )
 
 
 def load_picotron_state(path: Path) -> dict[str, torch.Tensor]:
@@ -43,6 +56,9 @@ def load_picotron_state(path: Path) -> dict[str, torch.Tensor]:
     state = ckpt.get("model")
     if state is None:
         raise ValueError(f"Checkpoint '{path}' missing 'model' key")
+    if not isinstance(state, OrderedDict):
+        state = OrderedDict(state)
+    state = strip_orig_mod_prefix(state)
     return {picotron_to_hf_key(k): v.detach().cpu() for k, v in state.items()}
 
 
