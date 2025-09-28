@@ -29,5 +29,10 @@ source .venv/bin/activate
   ```
 - Outputs `model.safetensors` and `config.json`; pass `--tokenizer-dir` to copy tokenizer files
 
+### Token Statistics
+- `python src/misc/token_stats.py`
+- Current snapshot (`data/tokens`): 200 files, 58,205,514,736 tokens
+- Complete sequences of length 1024: 56,841,217
+
 ### License
 MIT
