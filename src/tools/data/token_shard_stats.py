@@ -1,12 +1,12 @@
 import argparse
+from collections.abc import Iterable
 import glob
 import os
-from typing import Iterable, List
 
 import numpy as np
 
 
-def find_npy_files(path: str) -> List[str]:
+def find_npy_files(path: str) -> list[str]:
     if os.path.isdir(path):
         pattern = os.path.join(path, "**", "*.npy")
         paths = glob.glob(pattern, recursive=True)
@@ -37,7 +37,9 @@ def compute_stats(npy_paths: Iterable[str], seq_length: int) -> tuple[int, int]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compute token and sequence statistics for .npy token shards.")
+    parser = argparse.ArgumentParser(
+        description="Compute token and sequence statistics for .npy token shards."
+    )
     parser.add_argument(
         "path",
         nargs="?",
@@ -67,4 +69,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

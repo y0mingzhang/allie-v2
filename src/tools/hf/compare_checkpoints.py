@@ -42,7 +42,7 @@ def picotron_to_hf_key(key: str) -> str:
 
 
 def strip_orig_mod_prefix(state: OrderedDict[str, torch.Tensor]) -> OrderedDict[str, torch.Tensor]:
-    if not any(key.startswith("_orig_mod.") for key in state.keys()):
+    if not any(key.startswith("_orig_mod.") for key in state):
         return state
     prefix = "_orig_mod."
     return OrderedDict(

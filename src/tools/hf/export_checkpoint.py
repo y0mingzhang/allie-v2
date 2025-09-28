@@ -41,7 +41,6 @@ os.environ.setdefault("CONTEXT_PARALLEL", "0")
 
 def _ensure_flash_attn_stub() -> None:
     try:
-
         return
     except Exception:
         pass

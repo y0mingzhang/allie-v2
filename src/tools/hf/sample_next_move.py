@@ -17,7 +17,7 @@ import pathlib
 import sys
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as torch_functional
 from transformers import AutoModelForCausalLM
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -90,7 +90,7 @@ def compute_next_move_distribution(
         dtype=torch.long,
     )
     move_logits = next_logits.index_select(0, move_indices)
-    move_probs = F.softmax(move_logits, dim=-1)
+    move_probs = torch_functional.softmax(move_logits, dim=-1)
     return move_probs
 
 
