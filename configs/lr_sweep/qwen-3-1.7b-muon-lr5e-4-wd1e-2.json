@@ -3,26 +3,25 @@
         "tp_size": 1,
         "cp_size": 1,
         "pp_size": 1,
-        "dp_size": 4,
+        "dp_size": 1,
         "pp_engine": "1f1b",
         "backend": "nccl",
         "use_cpu": false
     },
     "model": {
-        "name": "meta-llama/Llama-3.2-1B",
+        "name": "Qwen/Qwen3-1.7B",
         "use_flash_attention": true,
-        "use_fused_adam": false,
+        "use_fused_adam": true,
         "vocab_size": 2350,
         "max_position_embeddings": 1024
     },
     "training": {
         "seed": 42,
-        "learning_rate": 1.5e-4,
-        "weight_decay": 0.05,
-        "total_train_steps": 3814,
+        "learning_rate": 5e-4,
+        "total_train_steps": 1000,
         "seq_length": 1024,
-        "micro_batch_size": 64,
-        "gradient_accumulation_steps": 1,
+        "micro_batch_size": 32,
+        "gradient_accumulation_steps": 2,
         "max_tokens": 1000000000,
         "grad_clip_norm": 1.5,
         "torch_compile": false,
@@ -30,7 +29,7 @@
         "torch_compile_fullgraph": false,
         "optimizer": {
             "name": "muon",
-            "weight_decay": 0.05,
+            "weight_decay": 0.01,
             "momentum": 0.9,
             "ns_coefficients": [3.4445, -4.775, 2.0315],
             "ns_steps": 5,
@@ -39,11 +38,11 @@
         },
         "lr_schedule": {
             "type": "warmup_stable_decay",
-            "warmup_steps": 382,
-            "stable_steps": 2000,
-            "decay_steps": 1432,
-            "max_lr": 3e-4,
-            "min_lr": 3e-5
+            "warmup_steps": 100,
+            "stable_steps": 600,
+            "decay_steps": 300,
+            "max_lr": 5e-4,
+            "min_lr": 5e-5
         }
     },
     "dataset": {
@@ -57,14 +56,14 @@
         "num_samples": 1024
     },
     "checkpoint": {
-        "save_dir": "models/Llama-3-1b-muon",
-        "save_frequency": 3500,
+        "save_dir": "models/tiny-qwen-3-1.7b-muon-lr5e-4-wd1e-2",
+        "save_frequency": 1000,
         "load_path": ""
     },
     "logging": {
         "use_wandb": true,
         "project_name": "chess-v2",
-        "run_name": "tiny-llama-3-1b-muon-1b"
+        "run_name": "tiny-qwen-3-1.7b-muon-lr5e-4-wd1e-2"
     },
     "environment": {
         "OMP_NUM_THREADS": "1",

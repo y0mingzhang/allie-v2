@@ -226,8 +226,9 @@ class Qwen3Attention(nn.Module):
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_values * self.head_dim, bias=use_bias)
         self.out_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=use_bias)
 
-        self.q_norm = LlamaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = LlamaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        HeadRMSNorm = TritonRMSNorm if os.getenv('FLASH_ATTEN', '1') == '1' else LlamaRMSNorm
+        self.q_norm = HeadRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = HeadRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.attention_dropout = getattr(config, "attention_dropout", 0.0)
 
         layer_types = getattr(config, "layer_types", None)

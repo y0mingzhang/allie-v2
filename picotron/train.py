@@ -205,7 +205,7 @@ if __name__ == "__main__":
 
     # download model on the first rank, assume all ranks have access to the same filesystem
     if pgm.process_group_manager.global_rank == 0:
-        download_model(config["model"]["name"], os.environ["HF_TOKEN"])
+        download_model(config["model"]["name"], os.environ["HF_TOKEN"], f"hf_model_safetensors/{config['logging']['run_name']}")
 
     dist.barrier()
 
@@ -276,9 +276,13 @@ if __name__ == "__main__":
         if pgm.process_group_manager.pp_world_size > 1:
             model = PipelineParallel(model, model_config)
 
-    model = init_model_with_materialized_weights(model, model_config, save_dir=f"./hf_model_safetensors/")
+    model = init_model_with_materialized_weights(model, model_config, save_dir=f"hf_model_safetensors/{config['logging']['run_name']}")
 
     #TODO: load existing checkpoint here to continue pre-training
+
+    if pgm.process_group_manager.global_rank == 0:
+        print("Model architecture:", is_print_rank=is_wandb_rank)
+        print(model, is_print_rank=is_wandb_rank)
 
     if pgm.process_group_manager.cp_world_size > 1:
         model = apply_context_parallel(model)
@@ -291,6 +295,7 @@ if __name__ == "__main__":
             if pgm.process_group_manager.global_rank == 0:
                 print("Warning: torch.compile is not available in this PyTorch build; skipping compilation.", is_print_rank=True)
         else:
+            print("compiling model...")
             model = torch.compile(model)
     
     if pgm.process_group_manager.dp_world_size > 1:

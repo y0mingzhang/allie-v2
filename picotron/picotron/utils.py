@@ -93,7 +93,7 @@ def average_loss_across_dp_cp_ranks(loss, device):
         reduced_loss /= pgm.process_group_manager.cp_dp_world_size
     return reduced_loss.item()
 
-def download_model(model_name, hf_token):
+def download_model(model_name, hf_token, local_dir):
     dst = os.path.join("hf_model", model_name)
     os.makedirs(dst, exist_ok=True)
     # check if model is already downloaded
@@ -103,9 +103,9 @@ def download_model(model_name, hf_token):
     # Download HF model safetensors at the "dst" directory
     huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
     print("Downloading SafeTensors files...")
-    huggingface_hub.snapshot_download(model_name, repo_type="model", local_dir="hf_model_safetensors", token=hf_token,
+    huggingface_hub.snapshot_download(model_name, repo_type="model", local_dir=local_dir, token=hf_token,
                                       allow_patterns=["*.safetensors", "*.json"])
     # Check if the model has SafeTensors files
-    if not glob.glob("hf_model_safetensors/*.safetensors"):
+    if not glob.glob(f"{local_dir}/*.safetensors"):
         raise ValueError(f"Model {model_name} does not have SafeTensors files.")
     print("SafeTensors files downloaded successfully! ✅")

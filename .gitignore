@@ -57,3 +57,4 @@ benchmark_cache_*/
 hf_model*
 wandb/
 models/
+log*.out

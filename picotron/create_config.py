@@ -131,6 +131,6 @@ if __name__ == "__main__":
 
     print("Configs created successfully! ✅")
 
-    download_model(args.model_name, args.hf_token)
+    download_model(args.model_name, args.hf_token, local_dir=f"hf_model_safetensors/{args.exp_name}")
 
     print("SafeTensors files downloaded successfully! ✅")
