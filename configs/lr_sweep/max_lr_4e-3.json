@@ -3,8 +3,7 @@
         "tp_size": 1,
         "cp_size": 1,
         "pp_size": 1,
-        "dp_size": 1,
-        "pp_engine": "1f1b",
+        "dp_size": 2,
         "backend": "nccl",
         "use_cpu": false
     },
@@ -17,16 +16,13 @@
     },
     "training": {
         "seed": 42,
-        "learning_rate": 5e-4,
         "total_train_steps": 1000,
         "seq_length": 1024,
-        "micro_batch_size": 32,
+        "micro_batch_size": 48,
         "gradient_accumulation_steps": 2,
-        "max_tokens": 1000000000,
+        "max_tokens": null,
         "grad_clip_norm": 1.5,
-        "torch_compile": false,
-        "torch_compile_mode": "default",
-        "torch_compile_fullgraph": false,
+        "torch_compile": true,
         "optimizer": {
             "name": "muon",
             "weight_decay": 0.05,
@@ -38,11 +34,11 @@
         },
         "lr_schedule": {
             "type": "warmup_stable_decay",
-            "warmup_steps": 100,
-            "stable_steps": 600,
-            "decay_steps": 300,
-            "max_lr": 5e-4,
-            "min_lr": 5e-5
+            "warmup_steps": 20,
+            "stable_steps": 880,
+            "decay_steps": 100,
+            "max_lr": 0.005,
+            "min_lr": 0.00025
         }
     },
     "dataset": {
@@ -53,21 +49,22 @@
     },
     "validation": {
         "every_steps": 200,
-        "num_samples": 1024
+        "num_samples": 4096
     },
     "checkpoint": {
-        "save_dir": "models/tiny-qwen-3-1.7b-muon-lr5e-4-wd5e-2",
+        "save_dir": "models/lr_sweep/qwen3-1.7b-lr-5e-3",
         "save_frequency": 1000,
         "load_path": ""
     },
     "logging": {
         "use_wandb": true,
         "project_name": "chess-v2",
-        "run_name": "tiny-qwen-3-1.7b-muon-lr5e-4-wd5e-2"
+        "run_name": "lr_sweep/qwen3-1.7b-lr-5e-3"
     },
     "environment": {
-        "OMP_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "2",
         "TOKENIZERS_PARALLELISM": "false",
         "FLASH_ATTEN": "1"
     }
 }
+

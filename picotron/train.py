@@ -127,7 +127,8 @@ def build_lr_scheduler(optimizer, training_cfg):
     schedule_type = schedule_cfg.get("type", "").lower()
     if schedule_type != "warmup_stable_decay":
         raise ValueError(f"Unsupported lr_schedule type: {schedule_type}")
-
+    
+    
     return WarmupStableDecayScheduler(optimizer, training_cfg["learning_rate"], schedule_cfg)
 
 if __name__ == "__main__":
@@ -137,7 +138,8 @@ if __name__ == "__main__":
 
     with open(args.config, "r") as f:
         config = json.load(f)
-    
+    config["training"]["learning_rate"] = config["training"]["lr_schedule"]["max_lr"]
+
     os.environ["OMP_NUM_THREADS"] = config["environment"]["OMP_NUM_THREADS"]
     os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
     os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"]
