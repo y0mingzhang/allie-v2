@@ -108,6 +108,44 @@ def parse_game(game: dict) -> ParsedGame:
     )
 
 
+def build_game_prompt_tokens(
+    seconds_per_side: str,
+    increment: str,
+    white_elo: int,
+    black_elo: int,
+    moves: list[str],
+) -> list[int]:
+    """Build token IDs for a game prompt (without termination token).
+
+    This is useful for inference where you want to generate continuations.
+    For training data tokenization, use tokenize_game() instead.
+    """
+    tokens: list[str] = [Tokenizer.bos_token]
+
+    # Time control metadata - use <unk> token if not in vocabulary
+    if seconds_per_side in SECONDS_PER_SIDE:
+        tokens.append(f"<seconds_per_side:{seconds_per_side}>")
+    else:
+        tokens.append(Tokenizer.unk_token)
+
+    if increment in INCREMENTS:
+        tokens.append(f"<increment:{increment}>")
+    else:
+        tokens.append(Tokenizer.unk_token)
+
+    for digit in digitize_elo(white_elo):
+        tokens.append(f"<elo_digit:{digit}>")
+    for digit in digitize_elo(black_elo):
+        tokens.append(f"<elo_digit:{digit}>")
+
+    # Add all moves
+    for move in moves:
+        tokens.append(f"<move:{move}>")
+
+    token_ids = Tokenizer.encode(tokens)
+    return token_ids.tolist()
+
+
 def tokenize_game(parsed_game: ParsedGame) -> np.ndarray:
     # 1) BOS token
     tokens = [Tokenizer.bos_token]

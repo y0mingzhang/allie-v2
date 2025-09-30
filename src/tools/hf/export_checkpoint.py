@@ -38,6 +38,7 @@ from transformers import AutoConfig
 
 try:
     from huggingface_hub import HfApi, create_repo
+
     HF_HUB_AVAILABLE = True
 except ImportError:
     HF_HUB_AVAILABLE = False
@@ -66,7 +67,7 @@ TORCH_COMPILE_PREFIX = "_orig_mod."
 
 def _ensure_flash_attn_stub() -> None:
     """Create a CPU-compatible stub for flash_attn to avoid CUDA initialization.
-    
+
     This stub implements basic versions of flash_attn functions that work on CPU,
     allowing the model to be loaded without GPU access.
     """
@@ -157,7 +158,7 @@ def _ensure_flash_attn_stub() -> None:
     layers_namespace = types.SimpleNamespace(rotary=rotary_module)
     triton_namespace = types.SimpleNamespace(layer_norm=layer_norm_module)
     ops_namespace = types.SimpleNamespace(triton=triton_namespace)
-    
+
     flash_attn_root.flash_attn_interface = interface_module
     flash_attn_root.layers = layers_namespace
     flash_attn_root.ops = ops_namespace
@@ -317,7 +318,7 @@ def instantiate_model(model_cfg: AutoConfig) -> torch.nn.Module:
     """Instantiate the model based on its type."""
     model_type = getattr(model_cfg, "model_type", "")
     logger.info(f"Instantiating {model_type} model")
-    
+
     if model_type == "qwen3":
         model_cls = Qwen3Model
     elif model_type in {"llama", "llama2", "llama3"}:
@@ -327,7 +328,7 @@ def instantiate_model(model_cfg: AutoConfig) -> torch.nn.Module:
             f"Unsupported model type for export: {model_type!r}. "
             f"Supported types: qwen3, llama, llama2, llama3"
         )
-    
+
     model = model_cls(config=model_cfg)
     model.eval()
     return model
@@ -337,10 +338,9 @@ def _strip_torch_compile_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str
     """Remove torch.compile prefix from state dict keys."""
     if not any(key.startswith(TORCH_COMPILE_PREFIX) for key in state_dict):
         return state_dict
-    
+
     return OrderedDict(
-        (key.removeprefix(TORCH_COMPILE_PREFIX), value)
-        for key, value in state_dict.items()
+        (key.removeprefix(TORCH_COMPILE_PREFIX), value) for key, value in state_dict.items()
     )
 
 
@@ -348,16 +348,16 @@ def load_checkpoint(model: torch.nn.Module, ckpt_path: str) -> None:
     """Load Picotron checkpoint into model."""
     logger.info(f"Loading checkpoint from {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    
+
     state_dict = checkpoint.get("model")
     if state_dict is None:
         raise ValueError(
             "Checkpoint missing 'model' key. Did you pass the correct Picotron .pth file?"
         )
-    
+
     # Strip torch.compile prefix if present
     state_dict = _strip_torch_compile_prefix(state_dict)
-    
+
     # Sanity check: verify embedding shapes match expected vocab size
     embedding_key = "embedding.weight"
     if embedding_key in state_dict:
@@ -365,14 +365,14 @@ def load_checkpoint(model: torch.nn.Module, ckpt_path: str) -> None:
         expected_vocab_size = model.embedding.weight.shape[0]
         logger.info(f"Checkpoint embedding shape: {state_dict[embedding_key].shape}")
         logger.info(f"Model expects vocab_size: {expected_vocab_size}")
-        
+
         if actual_vocab_size != expected_vocab_size:
             raise ValueError(
                 f"Vocab size mismatch! Checkpoint has {actual_vocab_size} embeddings, "
                 f"but model expects {expected_vocab_size}. "
                 f"Check that the training config vocab_size matches the checkpoint."
             )
-    
+
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         raise ValueError(f"Model state dict missing keys: {missing}")
@@ -395,7 +395,7 @@ def convert_state_dict_to_hf(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     for key, tensor in picotron_state.items():
         hf_key = picotron_to_hf_key(key)
         hf_state[hf_key] = tensor.detach().cpu()
-    
+
     # Sanity check: verify vocab size in converted state
     if "model.embed_tokens.weight" in hf_state:
         vocab_size = hf_state["model.embed_tokens.weight"].shape[0]
@@ -406,7 +406,7 @@ def convert_state_dict_to_hf(model: torch.nn.Module) -> dict[str, torch.Tensor]:
                 logger.warning(
                     f"LM head vocab size ({lm_head_vocab}) differs from embedding vocab size ({vocab_size})"
                 )
-    
+
     logger.info(f"Converted {len(hf_state)} parameters")
     return hf_state
 
@@ -421,18 +421,18 @@ def save_hf_artifacts(
     """Save model, config, and optionally tokenizer to output directory."""
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Final sanity check: verify config vocab_size matches actual weights
     if "model.embed_tokens.weight" in hf_state:
         actual_vocab_size = hf_state["model.embed_tokens.weight"].shape[0]
         config_vocab_size = model_cfg.vocab_size
-        
-        logger.info(f"{'='*60}")
-        logger.info(f"SANITY CHECK:")
+
+        logger.info(f"{'=' * 60}")
+        logger.info("SANITY CHECK:")
         logger.info(f"  Config vocab_size: {config_vocab_size}")
         logger.info(f"  Actual embedding weights: {actual_vocab_size}")
-        logger.info(f"{'='*60}")
-        
+        logger.info(f"{'=' * 60}")
+
         if actual_vocab_size != config_vocab_size:
             raise ValueError(
                 f"CRITICAL: Config vocab_size ({config_vocab_size}) does not match "
@@ -447,7 +447,7 @@ def save_hf_artifacts(
     # Save config with correct token IDs
     logger.info(f"Saving config to {out_path / 'config.json'}")
     model_cfg.dtype = dtype
-    
+
     # Set token IDs based on custom chess tokenizer
     # Chess tokenizer only has <bos> and <unk>, no separate EOS/PAD
     # Set all special tokens to BOS token ID
@@ -456,7 +456,7 @@ def save_hf_artifacts(
         model_cfg.eos_token_id = 2348  # No separate EOS, use BOS
         model_cfg.pad_token_id = 2348  # No separate PAD, use BOS
         logger.info(f"Set custom chess tokenizer IDs: bos=eos=pad={model_cfg.bos_token_id}")
-    
+
     model_cfg.save_pretrained(out_path)
 
     # Copy tokenizer if provided
@@ -475,7 +475,7 @@ def save_hf_artifacts(
                 shutil.copytree(item, dest)
             else:
                 shutil.copy2(item, dest)
-    
+
     logger.info(f"✓ Export complete! Files saved to {out_path}")
 
 
@@ -485,14 +485,14 @@ def upload_to_hub(output_dir: str, repo_id: str, private: bool = False) -> None:
         raise ImportError(
             "huggingface_hub is not installed. Install it with: pip install huggingface_hub"
         )
-    
-    logger.info(f"{'='*60}")
+
+    logger.info(f"{'=' * 60}")
     logger.info(f"Uploading to HuggingFace Hub: {repo_id}")
     logger.info(f"Repository visibility: {'Private' if private else 'Public'}")
-    logger.info(f"{'='*60}")
-    
+    logger.info(f"{'=' * 60}")
+
     api = HfApi()
-    
+
     # Create repository if it doesn't exist
     try:
         logger.info("Creating/checking repository...")
@@ -501,11 +501,11 @@ def upload_to_hub(output_dir: str, repo_id: str, private: bool = False) -> None:
     except Exception as e:
         logger.error(f"Failed to create repository: {e}")
         raise
-    
+
     # Upload all files
     out_path = Path(output_dir)
     files_to_upload = list(out_path.iterdir())
-    
+
     logger.info(f"Uploading {len(files_to_upload)} files...")
     for idx, file_path in enumerate(files_to_upload, 1):
         if file_path.is_file():
@@ -521,23 +521,25 @@ def upload_to_hub(output_dir: str, repo_id: str, private: bool = False) -> None:
             except Exception as e:
                 logger.error(f"Failed to upload {file_path.name}: {e}")
                 raise
-    
-    logger.info(f"{'='*60}")
-    logger.info(f"✓ Upload complete!")
+
+    logger.info(f"{'=' * 60}")
+    logger.info("✓ Upload complete!")
     logger.info(f"View your model at: https://huggingface.co/{repo_id}")
-    logger.info(f"{'='*60}")
+    logger.info(f"{'=' * 60}")
 
 
 def main() -> None:
     args = parse_args()
-    
+
     # Validate upload arguments
     if args.upload and not args.repo_id:
         logger.error("--repo-id is required when --upload is set")
         return
-    
+
     if args.upload and not HF_HUB_AVAILABLE:
-        logger.error("huggingface_hub is not installed. Install it with: pip install huggingface_hub")
+        logger.error(
+            "huggingface_hub is not installed. Install it with: pip install huggingface_hub"
+        )
         return
 
     try:
@@ -552,11 +554,11 @@ def main() -> None:
         load_checkpoint(model, args.checkpoint)
         hf_state = convert_state_dict_to_hf(model)
         save_hf_artifacts(model_cfg, hf_state, args.output_dir, args.tokenizer_dir, args.dtype)
-        
+
         # Upload to HuggingFace Hub if requested
         if args.upload:
             upload_to_hub(args.output_dir, args.repo_id, args.private)
-            
+
     except Exception as e:
         logger.error(f"Export failed: {e}")
         raise
