@@ -358,6 +358,21 @@ def load_checkpoint(model: torch.nn.Module, ckpt_path: str) -> None:
     # Strip torch.compile prefix if present
     state_dict = _strip_torch_compile_prefix(state_dict)
     
+    # Sanity check: verify embedding shapes match expected vocab size
+    embedding_key = "embedding.weight"
+    if embedding_key in state_dict:
+        actual_vocab_size = state_dict[embedding_key].shape[0]
+        expected_vocab_size = model.embedding.weight.shape[0]
+        logger.info(f"Checkpoint embedding shape: {state_dict[embedding_key].shape}")
+        logger.info(f"Model expects vocab_size: {expected_vocab_size}")
+        
+        if actual_vocab_size != expected_vocab_size:
+            raise ValueError(
+                f"Vocab size mismatch! Checkpoint has {actual_vocab_size} embeddings, "
+                f"but model expects {expected_vocab_size}. "
+                f"Check that the training config vocab_size matches the checkpoint."
+            )
+    
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         raise ValueError(f"Model state dict missing keys: {missing}")
@@ -380,6 +395,18 @@ def convert_state_dict_to_hf(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     for key, tensor in picotron_state.items():
         hf_key = picotron_to_hf_key(key)
         hf_state[hf_key] = tensor.detach().cpu()
+    
+    # Sanity check: verify vocab size in converted state
+    if "model.embed_tokens.weight" in hf_state:
+        vocab_size = hf_state["model.embed_tokens.weight"].shape[0]
+        logger.info(f"Converted embedding vocab_size: {vocab_size}")
+        if "lm_head.weight" in hf_state:
+            lm_head_vocab = hf_state["lm_head.weight"].shape[0]
+            if lm_head_vocab != vocab_size:
+                logger.warning(
+                    f"LM head vocab size ({lm_head_vocab}) differs from embedding vocab size ({vocab_size})"
+                )
+    
     logger.info(f"Converted {len(hf_state)} parameters")
     return hf_state
 
@@ -394,6 +421,24 @@ def save_hf_artifacts(
     """Save model, config, and optionally tokenizer to output directory."""
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
+    
+    # Final sanity check: verify config vocab_size matches actual weights
+    if "model.embed_tokens.weight" in hf_state:
+        actual_vocab_size = hf_state["model.embed_tokens.weight"].shape[0]
+        config_vocab_size = model_cfg.vocab_size
+        
+        logger.info(f"{'='*60}")
+        logger.info(f"SANITY CHECK:")
+        logger.info(f"  Config vocab_size: {config_vocab_size}")
+        logger.info(f"  Actual embedding weights: {actual_vocab_size}")
+        logger.info(f"{'='*60}")
+        
+        if actual_vocab_size != config_vocab_size:
+            raise ValueError(
+                f"CRITICAL: Config vocab_size ({config_vocab_size}) does not match "
+                f"actual embedding weights ({actual_vocab_size})! "
+                f"The exported model would be broken. Export aborted."
+            )
 
     # Save model weights
     logger.info(f"Saving model weights to {out_path / 'model.safetensors'}")
@@ -404,13 +449,13 @@ def save_hf_artifacts(
     model_cfg.dtype = dtype
     
     # Set token IDs based on custom chess tokenizer
-    # BOS token is at index vocab_size - 2, termination tokens are at vocab_size - 4 and - 3
-    # Use normal termination as EOS token
+    # Chess tokenizer only has <bos> and <unk>, no separate EOS/PAD
+    # Set all special tokens to BOS token ID
     if model_cfg.vocab_size == 2350:
         model_cfg.bos_token_id = 2348  # <bos>
-        model_cfg.eos_token_id = 2346  # <termination:normal>
-        model_cfg.pad_token_id = 2349  # <unk> used as pad
-        logger.info(f"Set custom chess tokenizer IDs: bos={model_cfg.bos_token_id}, eos={model_cfg.eos_token_id}, pad={model_cfg.pad_token_id}")
+        model_cfg.eos_token_id = 2348  # No separate EOS, use BOS
+        model_cfg.pad_token_id = 2348  # No separate PAD, use BOS
+        logger.info(f"Set custom chess tokenizer IDs: bos=eos=pad={model_cfg.bos_token_id}")
     
     model_cfg.save_pretrained(out_path)
 
