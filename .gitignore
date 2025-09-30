@@ -58,4 +58,4 @@ hf_model*
 wandb/
 models/
 log*.out
-exports/
+export/
