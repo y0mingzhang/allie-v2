@@ -12,13 +12,15 @@ import picotron.process_group_manager as pgm
 
 
 class NpyTokenDataset(Dataset):
-    """Virtually concatenates multiple 1D .npy token files and yields fixed-length windows.
+    """Reads pre-packed batches from .npy token files.
 
-    Windows do not cross file boundaries. If a single path is provided (no glob), it behaves as before.
+    Assumes the .npy files contain pre-packed batches where each batch is (seq_length + 1) tokens,
+    and each batch starts with a new game (BOS token).
     """
 
     def __init__(self, npy_glob_or_path: str, seq_length: int, num_samples: int | None = None):
         self.seq_length = seq_length
+        self.pack_size = seq_length + 1  # Each batch is seq_length + 1 tokens
 
         # Resolve paths from glob or single path
         paths: List[str]
@@ -39,11 +41,11 @@ class NpyTokenDataset(Dataset):
             arr = np.load(p, mmap_mode='r')
             if arr.ndim != 1:
                 raise ValueError(f"Expected 1D array in {p}, got shape {arr.shape}")
-            if len(arr) < seq_length + 1:
+            if len(arr) < self.pack_size:
                 # Skip too-short files
                 continue
-            total_length = ((len(arr) - 1) // seq_length) * seq_length + 1
-            num_seq = (total_length - 1) // seq_length
+            # Each sequence is exactly pack_size tokens (seq_length + 1)
+            num_seq = len(arr) // self.pack_size
             if num_seq <= 0:
                 continue
             self.files.append(arr)
@@ -51,7 +53,7 @@ class NpyTokenDataset(Dataset):
             self.file_num_sequences.append(num_seq)
 
         if not self.files:
-            raise ValueError("All candidate .npy files are too short for the requested seq_length+1")
+            raise ValueError(f"All candidate .npy files are too short for pack_size={self.pack_size}")
 
         # Prefix sum to map global idx -> (file_idx, local_idx)
         self.file_index_offsets: List[int] = [0]
@@ -87,8 +89,9 @@ class NpyTokenDataset(Dataset):
         file_idx = left if self.file_index_offsets[left] <= idx < self.file_index_offsets[left + 1] else right
         local_idx = idx - self.file_index_offsets[file_idx]
 
-        start = local_idx * self.seq_length
-        end = start + self.seq_length + 1
+        # Read a fixed-size batch (seq_length + 1 tokens)
+        start = local_idx * self.pack_size
+        end = start + self.pack_size
         seq = np.asarray(self.files[file_idx][start:end], dtype=np.int64)
         return {"input_ids": seq}
 

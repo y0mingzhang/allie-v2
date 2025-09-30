@@ -70,6 +70,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show progress bars while reading",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1024,
+        help="Pack games into fixed-size batches (default: 1024)",
+    )
+    parser.add_argument(
+        "--bos-token-id",
+        type=int,
+        default=2348,
+        help="Token ID for beginning-of-sequence (default: 2348)",
+    )
     return parser.parse_args()
 
 
@@ -82,77 +94,100 @@ def build_streaming_dataset(paths: list[str]):
     ).shuffle(seed=913842)
 
 
-def concatenate_and_save_with_val_split(
+def pack_games_into_batches(
     paths: list[str],
     out_dir: str,
+    batch_size: int,
+    bos_token_id: int,
     show_progress: bool = False,
     val_prob: float = 0.0001,
     rng_seed: int = 12345,
 ) -> None:
-    # First pass: count train/val tokens deterministically
-    logger.info("Counting tokens for train/val (first pass)...")
+    pack_size = batch_size + 1
+    logger.info("Packing games into batches of size %d...", pack_size)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Pass 1: Count tokens
+    logger.info("Pass 1: Counting tokens...")
     dataset = build_streaming_dataset(paths)
     rng = np.random.default_rng(rng_seed)
-    train_total = 0
-    val_total = 0
+
+    train_count = 0
+    val_count = 0
+    train_buffer_len = 0
+    val_buffer_len = 0
+
     iterator = _iter_tokens(dataset)
     if show_progress:
-        iterator = tqdm(iterator, desc="Counting sequences")
+        iterator = tqdm(iterator, desc="Counting")
+
     for tokens in iterator:
+        assert isinstance(tokens, list), str(tokens)
+        assert tokens[0] == bos_token_id, str(tokens)
+
         is_val = rng.random() < val_prob
         if is_val:
-            val_total += len(tokens)
+            val_buffer_len += len(tokens)
+            if val_buffer_len >= pack_size:
+                val_count += pack_size
+                val_buffer_len = 0
         else:
-            train_total += len(tokens)
-    if train_total + val_total == 0:
-        raise ValueError("No tokens found in provided parquets")
-    logger.info(
-        "Total tokens -> train: %d, val: %d (%.6f%% val)",
-        train_total,
-        val_total,
-        (val_total / max(1, train_total + val_total)) * 100.0,
-    )
+            train_buffer_len += len(tokens)
+            if train_buffer_len >= pack_size:
+                train_count += pack_size
+                train_buffer_len = 0
 
-    # Second pass: allocate and write
-    logger.info("Concatenating into uint16 arrays (second pass)...")
-    os.makedirs(out_dir, exist_ok=True)
-    train_out = np.empty(train_total, dtype=np.uint16)
-    val_out = np.empty(val_total, dtype=np.uint16)
+    logger.info("Train: %d tokens, Val: %d tokens", train_count, val_count)
+
+    # Pass 2: Write tokens
+    logger.info("Pass 2: Writing tokens...")
+    train_out = np.empty(train_count, dtype=np.uint16)
+    val_out = np.empty(val_count, dtype=np.uint16)
 
     dataset = build_streaming_dataset(paths)
     rng = np.random.default_rng(rng_seed)
+
     train_pos = 0
     val_pos = 0
+    train_buffer = []
+    val_buffer = []
+
     iterator = _iter_tokens(dataset)
     if show_progress:
-        iterator = tqdm(iterator, desc="Writing sequences")
-    for tokens in iterator:
-        is_val = rng.random() < val_prob
-        arr = np.asarray(tokens, dtype=np.uint16)
-        n = arr.size
-        if is_val:
-            val_out[val_pos : val_pos + n] = arr
-            val_pos += n
-        else:
-            train_out[train_pos : train_pos + n] = arr
-            train_pos += n
+        iterator = tqdm(iterator, desc="Writing")
 
-    assert train_pos == train_total, f"Wrote {train_pos} train tokens but expected {train_total}"
-    assert val_pos == val_total, f"Wrote {val_pos} val tokens but expected {val_total}"
+    for tokens in iterator:
+        assert isinstance(tokens, list), str(tokens)
+        assert tokens[0] == bos_token_id, str(tokens)
+
+        is_val = rng.random() < val_prob
+        buffer = val_buffer if is_val else train_buffer
+        pos = val_pos if is_val else train_pos
+        arr = val_out if is_val else train_out
+
+        buffer.extend(tokens)
+        if len(buffer) >= pack_size:
+            arr[pos : pos + pack_size] = buffer[:pack_size]
+            if is_val:
+                val_pos += pack_size
+            else:
+                train_pos += pack_size
+            buffer.clear()
+
+    logger.info(
+        "Created %d train batches (%d tokens), %d val batches (%d tokens)",
+        len(train_out) // pack_size,
+        len(train_out),
+        len(val_out) // pack_size,
+        len(val_out),
+    )
 
     train_path = os.path.join(out_dir, "train.npy")
     val_path = os.path.join(out_dir, "val.npy")
-    logger.info("Saving train to %s", train_path)
     np.save(train_path, train_out)
-    logger.info("Saving val to %s", val_path)
     np.save(val_path, val_out)
     logger.info(
-        "Done: train=%s (shape=%s), val=%s (shape=%s), dtype=%s",
-        train_path,
-        train_out.shape,
-        val_path,
-        val_out.shape,
-        train_out.dtype,
+        "Done: train=%s (%s), val=%s (%s)", train_path, train_out.shape, val_path, val_out.shape
     )
 
 
@@ -165,7 +200,13 @@ def main() -> None:
         raise ValueError(f"Empty slice: start={start} >= end={end}")
     slice_paths = parquet_paths[start:end]
     logger.info("Using %d parquet(s)", len(slice_paths))
-    concatenate_and_save_with_val_split(slice_paths, args.out_dir, show_progress=args.progress)
+    pack_games_into_batches(
+        slice_paths,
+        args.out_dir,
+        batch_size=args.batch_size,
+        bos_token_id=args.bos_token_id,
+        show_progress=args.progress,
+    )
 
 
 if __name__ == "__main__":

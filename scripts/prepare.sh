@@ -22,7 +22,7 @@ export HF_XET_CACHE=/scratch/yimingz3/hf_cache/xet
 # Env vars with sensible defaults
 REPO_ROOT=${REPO_ROOT:-/home/yimingz3/src/chess-v2}
 LIST_FILE=${LIST_FILE:-$REPO_ROOT/data/filtered_parquets_shuffled.txt}
-OUT_BASE=${OUT_BASE:-$REPO_ROOT/data/tokens}
+OUT_BASE=${OUT_BASE:-$REPO_ROOT/data/tokens_v2}
 
 mkdir -p "$REPO_ROOT/logs/prepare" "$OUT_BASE"
 
@@ -58,6 +58,6 @@ srun python -u "$REPO_ROOT/src/data/prepare_npy.py" \
   --start "$start" \
   --end "$end" \
   --out-dir "$OUT_DIR" \
+  --batch-size 1024 \
+  --bos-token-id 2348 \
   --progress
-
-
