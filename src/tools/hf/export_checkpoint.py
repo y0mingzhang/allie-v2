@@ -31,7 +31,7 @@ import types
 from safetensors.torch import save_file
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from transformers import AutoConfig
 
 os.environ.setdefault("DEVICE", "cpu")
@@ -143,8 +143,8 @@ def _ensure_flash_attn_stub() -> None:
 
 _ensure_flash_attn_stub()
 
-from picotron.model import Llama, Qwen3Model
-from picotron.process_group_manager import setup_process_group_manager
+from picotron.model import Llama, Qwen3Model  # noqa: E402
+from picotron.process_group_manager import setup_process_group_manager  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,7 +270,7 @@ def load_checkpoint(model: torch.nn.Module, ckpt_path: str) -> None:
     state_dict = checkpoint.get("model")
     if state_dict is None:
         raise ValueError("Checkpoint missing 'model' key. Did you pass the Picotron .pth file?")
-    if any(key.startswith("_orig_mod.") for key in state_dict.keys()):
+    if any(key.startswith("_orig_mod.") for key in state_dict):
         prefix = "_orig_mod."
         state_dict = OrderedDict(
             (key[len(prefix) :], value) if key.startswith(prefix) else (key, value)
