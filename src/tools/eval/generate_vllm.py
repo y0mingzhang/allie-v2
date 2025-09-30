@@ -17,7 +17,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model-dir",
-        default="yimingzhang/qwen-3-1.7b-chess-57b-step6050",
+        default="yimingzhang/qwen-3-1.7b-chess-57b-step39325",
         help="Path or HF Hub ID for the model",
     )
     parser.add_argument(
