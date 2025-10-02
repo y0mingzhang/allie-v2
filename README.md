@@ -5,6 +5,7 @@
 # Create and sync the virtual environment from pyproject
 uv sync
 
+uv pip install setuptools
 uv pip install -e picotron --no-build-isolation
 uv pip install vllm --torch-backend=auto
 
