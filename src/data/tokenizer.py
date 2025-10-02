@@ -6,6 +6,10 @@ from typing import ClassVar
 import chess
 import chess.pgn
 import numpy as np
+from tokenizers import Tokenizer as HFTokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import WhitespaceSplit
+from transformers import PreTrainedTokenizerFast
 
 from data.tokens import (
     CHESS_MOVES,
@@ -56,6 +60,18 @@ class Tokenizer:
     @classmethod
     def vocab_size(cls) -> int:
         return len(cls.vocab)
+
+    @classmethod
+    def to_huggingface(cls) -> PreTrainedTokenizerFast:
+        """Convert to HuggingFace tokenizer while preserving encode/decode."""
+        hf_tokenizer = HFTokenizer(WordLevel(vocab=cls.token_to_idx, unk_token=cls.unk_token))
+        hf_tokenizer.pre_tokenizer = WhitespaceSplit()
+
+        return PreTrainedTokenizerFast(
+            tokenizer_object=hf_tokenizer,
+            bos_token=cls.bos_token,
+            unk_token=cls.unk_token,
+        )
 
 
 def digitize_elo(elo: int) -> list[str]:

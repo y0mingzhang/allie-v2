@@ -459,7 +459,7 @@ def save_hf_artifacts(
 
     model_cfg.save_pretrained(out_path)
 
-    # Copy tokenizer if provided
+    # Copy tokenizer if provided, or generate HF tokenizer from custom chess tokenizer
     if tokenizer_dir is not None:
         logger.info(f"Copying tokenizer from {tokenizer_dir}")
         tok_src = Path(tokenizer_dir)
@@ -475,6 +475,16 @@ def save_hf_artifacts(
                 shutil.copytree(item, dest)
             else:
                 shutil.copy2(item, dest)
+    elif model_cfg.vocab_size == 2350:
+        # Generate HuggingFace tokenizer from custom chess tokenizer
+        logger.info("Generating HuggingFace tokenizer from custom chess tokenizer")
+        try:
+            from data.tokenizer import Tokenizer
+            hf_tok = Tokenizer.to_huggingface()
+            hf_tok.save_pretrained(out_path)
+            logger.info("✓ Generated HuggingFace tokenizer")
+        except Exception as e:
+            logger.warning(f"Failed to generate HuggingFace tokenizer: {e}")
 
     logger.info(f"✓ Export complete! Files saved to {out_path}")
 
