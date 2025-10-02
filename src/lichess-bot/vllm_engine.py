@@ -44,7 +44,8 @@ class VLLMEngine(MinimalEngine):
         super().__init__(
             commands, options, stderr, draw_or_resign, game, name, **popen_args
         )
-        self.api_url = "http://localhost:8000/v1/completions"
+        port = os.environ.get("VLLM_PORT", 8000)
+        self.api_url = f"http://localhost:{port}/v1/completions"
         self.move_token_ids = {Tokenizer.token_to_idx[token] for token in Tokenizer.chess_move_tokens}
         self.target_elo = 1500  # Default target ELO for the bot
         self.game = game

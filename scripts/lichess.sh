@@ -19,8 +19,8 @@ source .venv/bin/activate
 
 export VLLM_CPU_KVCACHE_SPACE=25
 export VLLM_CPU_NUM_OF_RESERVED_CPU=1
-
-vllm serve yimingzhang/qwen-3-1.7b-57b-cool-from-66550-step96800 --max-model-len 1024 --enforce-eager
+export VLLM_PORT=12398
+vllm serve yimingzhang/qwen-3-1.7b-57b-cool-from-66550-step96800 --max-model-len 1024 --enforce-eager --port 12398 &
 
 cd src/lichess-bot
 python lichess-bot.py --config config.yml &
