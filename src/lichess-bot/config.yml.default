@@ -28,7 +28,7 @@ challenge:                          # Incoming challenge settings
   max_increment: 180                # Accept up to 3 minute increment
   min_increment: 0                  # No minimum increment
   max_base: 10800                   # Accept up to 3 hour base time
-  min_base: 15                      # Minimum 15 seconds base time
+  min_base: 0                      # Minimum 15 seconds base time
   max_days: .inf                      # Max correspondence days
   min_days: 0                       # Min correspondence days
   variants:                         # Only play standard chess
@@ -48,10 +48,10 @@ challenge:                          # Incoming challenge settings
   allow_list: []                    # If non-empty, only accept from these users
 
 greeting:
-  hello: "Good luck! I'm powered by a vision-language model that sees the board like a human player."
-  goodbye: "Thanks for the game! Feel free to challenge me again anytime."
-  hello_spectators: "Welcome! You're watching a VLLM-based chess engine in action."
-  goodbye_spectators: "Thanks for spectating! Hope you enjoyed the game."
+  hello: ""
+  goodbye: ""
+  hello_spectators: ""
+  goodbye_spectators: ""
 
 matchmaking:
   allow_matchmaking: false          # Don't actively seek games for now

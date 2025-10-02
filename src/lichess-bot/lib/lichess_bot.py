@@ -677,11 +677,14 @@ def play_game(li: lichess.Lichess,
         takebacks_accepted = read_takeback_record(game)
         max_takebacks_accepted = config.max_takebacks_accepted
 
-        keyword_map: defaultdict[str, str] = defaultdict(str, me=game.me.name, opponent=game.opponent.name)
-        hello = get_greeting("hello", config.greeting, keyword_map)
-        goodbye = get_greeting("goodbye", config.greeting, keyword_map)
-        hello_spectators = get_greeting("hello_spectators", config.greeting, keyword_map)
-        goodbye_spectators = get_greeting("goodbye_spectators", config.greeting, keyword_map)
+        # Build greetings with dynamic ELO
+        target_elo = str(engine.get_target_elo()) if hasattr(engine, 'get_target_elo') else '?'
+        hello_msg1 = "Hi! I'm Allie - I'll try my best to play like a human would at your level."
+        hello_msg2 = f"I'm aiming for around {target_elo} strength. Feel free to use !elo <rating> to adjust if you'd like a different challenge!"
+        hello = (hello_msg1, hello_msg2)  # Tuple of two messages
+        goodbye = "Thanks for the game - that was fun! Feel free to challenge me again anytime."
+        hello_spectators = "Welcome! Thanks for watching - hope you enjoy the game!"
+        goodbye_spectators = "Thanks for watching! Hope it was interesting."
 
         disconnect_time = correspondence_disconnect_time if not game.state.get("moves") else seconds(0)
         prior_game = None
@@ -792,10 +795,15 @@ def get_greeting(greeting: str, greeting_cfg: Configuration, keyword_map: defaul
     return greeting_text.format_map(keyword_map)
 
 
-def say_hello(conversation: Conversation, hello: str, hello_spectators: str, board: chess.Board) -> None:
+def say_hello(conversation: Conversation, hello: str | tuple[str, str], hello_spectators: str, board: chess.Board) -> None:
     """Send the greetings to the chat rooms."""
     if len(board.move_stack) < 2:
-        conversation.send_message("player", hello)
+        # Handle tuple of messages (for multi-part greetings)
+        if isinstance(hello, tuple):
+            for msg in hello:
+                conversation.send_message("player", msg)
+        else:
+            conversation.send_message("player", hello)
         conversation.send_message("spectator", hello_spectators)
 
 

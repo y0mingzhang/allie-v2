@@ -584,6 +584,10 @@ class MinimalEngine(EngineWrapper):
         self.notify(<method_name>, <*args>, <**kwargs>)
         """
 
+    def set_elo(self, elo: int) -> None:
+        """Set the target ELO for the engine (optional override)."""
+        pass
+
 
 class FillerEngine:
     """

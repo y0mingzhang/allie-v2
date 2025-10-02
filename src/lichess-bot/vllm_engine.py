@@ -46,6 +46,8 @@ class VLLMEngine(MinimalEngine):
         )
         self.api_url = "http://localhost:8000/v1/completions"
         self.move_token_ids = {Tokenizer.token_to_idx[token] for token in Tokenizer.chess_move_tokens}
+        self.target_elo = 1500  # Default target ELO for the bot
+        self.game = game
         if game is None:
             self.game_info = {
                 "seconds_per_side": "300",
@@ -61,15 +63,14 @@ class VLLMEngine(MinimalEngine):
                 "white_elo": opponent_elo,
                 "black_elo": opponent_elo,
             }
-        
-        print(self.game_info)
+            self.target_elo = opponent_elo  # Start at opponent's level
 
     def search(self, board: chess.Board, time_limit: Limit, ponder: bool, draw_offered: bool, root_moves: MOVE) -> PlayResult:
         # Get legal moves
         legal_moves = list(board.legal_moves)
         if isinstance(root_moves, list):
             legal_moves = [move for move in legal_moves if move in root_moves]
-        
+
         # Create logit bias for legal moves only
         logit_bias = {}
         for i in range(Tokenizer.vocab_size()):
@@ -79,14 +80,29 @@ class VLLMEngine(MinimalEngine):
             token_id = Tokenizer.token_to_idx[move_token]
             logit_bias[token_id] = 0.0
         logit_bias[Tokenizer.token_to_idx[TerminationTokens.NORMAL_TERMINATION.value]] = 0.0
-        
-        
-        # Build prompt
+
+
+        # Build prompt with correct ELO assignment
         moves = [m.uci() for m in board.move_stack]
         seconds_per_side = self.game_info["seconds_per_side"]
         increment = self.game_info["increment"]
-        white_elo = self.game_info["white_elo"]
-        black_elo = self.game_info["black_elo"]
+
+        # Determine bot's color and assign ELOs correctly
+        if self.game is not None:
+            bot_is_white = self.game.is_white
+            opponent_elo = self.game.opponent.rating
+        else:
+            bot_is_white = True  # Default assumption
+            opponent_elo = 1500
+
+        # Assign ELOs: bot gets target_elo, opponent gets their actual rating
+        if bot_is_white:
+            white_elo = self.target_elo
+            black_elo = opponent_elo
+        else:
+            white_elo = opponent_elo
+            black_elo = self.target_elo
+
         prompt = build_game_prompt(seconds_per_side, increment, white_elo, black_elo, moves)
         
         # Make HTTP request to VLLM API
@@ -99,15 +115,22 @@ class VLLMEngine(MinimalEngine):
         
         response = requests.post(self.api_url, json=payload)
         result = response.json()
-
-        print(prompt)
-        print("result", result)
         token_str = result["choices"][0]["text"].strip()
         if token_str == TerminationTokens.NORMAL_TERMINATION.value:
-            print("resigned")
             return PlayResult(None, None, resigned=True)
         
         
         predicted_move = Tokenizer.extract_move_from_move_token(token_str)
-        logger.info(f"Selected move: {predicted_move.uci()}")
         return PlayResult(predicted_move, None)
+
+    def set_elo(self, elo: int) -> None:
+        """Set the target ELO for the bot."""
+        if 500 <= elo <= 3000:
+            self.target_elo = elo
+            logger.info(f"Target ELO set to {elo}")
+        else:
+            logger.warning(f"Invalid ELO {elo}. Must be between 500 and 3000.")
+
+    def get_target_elo(self) -> int:
+        """Get the current target ELO."""
+        return self.target_elo

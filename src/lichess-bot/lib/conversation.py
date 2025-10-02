@@ -70,7 +70,7 @@ class Conversation:
         if cmd in ("commands", "help"):
             self.send_reply(line,
                             "Supported commands: !wait (wait a minute for my first move), !name, "
-                            "!eval (or any text starting with !eval), !queue")
+                            "!eval (or any text starting with !eval), !queue, !elo <rating> (set bot strength 500-3000)")
         elif cmd == "wait" and self.game.is_abortable():
             self.game.ping(seconds(60), seconds(120), seconds(120))
             self.send_reply(line, "Waiting 60 seconds...")
@@ -88,6 +88,20 @@ class Conversation:
                 self.send_reply(line, f"Challenge queue: {challengers}")
             else:
                 self.send_reply(line, "No challenges queued.")
+        elif cmd.startswith("elo"):
+            parts = cmd.split()
+            if len(parts) == 2:
+                try:
+                    elo = int(parts[1])
+                    if 500 <= elo <= 3000:
+                        self.engine.set_elo(elo)
+                        self.send_reply(line, f"Got it! I'll aim for around {elo} strength now.")
+                    else:
+                        self.send_reply(line, "Please choose a rating between 500 and 3000!")
+                except ValueError:
+                    self.send_reply(line, "Usage: !elo <rating> (e.g., !elo 1500)")
+            else:
+                self.send_reply(line, "Usage: !elo <rating> (e.g., !elo 1500)")
 
     def send_reply(self, line: ChatLine, reply: str) -> None:
         """
