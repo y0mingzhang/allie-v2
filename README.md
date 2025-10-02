@@ -6,11 +6,23 @@
 uv sync
 
 uv pip install setuptools
+# Activate the virtual environment (ensures `which python` points to the venv)
+source .venv/bin/activate
+
+**For training:**
 uv pip install -e picotron --no-build-isolation
 uv pip install vllm --torch-backend=auto
 
-# Activate the virtual environment (ensures `which python` points to the venv)
-source .venv/bin/activate
+**For cpu-only inference on lichess:**
+git clone https://github.com/vllm-project/vllm.git vllm_source
+cd vllm_source
+
+uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match --torch-backend cpu
+uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu
+VLLM_TARGET_DEVICE=cpu python setup.py install
+
+cd src/lichess-bot
+uv pip install -r requirements.txt
 ```
 
 ### Training
@@ -31,18 +43,13 @@ source .venv/bin/activate
   ```
 - Outputs `model.safetensors` and `config.json`; pass `--tokenizer-dir` to copy tokenizer files
 
-### Tools
-- `uv run python src/tools/hf/download_tokens.py` — sync missing shards from `yimingzhang/lichess_tokens_v2`
-- `uv run python src/tools/hf/upload_tokens_to_hf.py` — upload `data/tokens/` to `yimingzhang/lichess_tokens`
-- `uv run python src/tools/hf/upload_tokenized_dataset_to_hf.py` — upload `data/dataset_v2/` to `yimingzhang/lichess_tokenized`
-- `uv run python src/tools/hf/export_checkpoint.py --config ... --checkpoint ... --output-dir ...` — convert Picotron checkpoint to HF format
-- `uv run python src/tools/hf/compare_checkpoints.py --picotron-ckpt ... --hf-dir ...` — verify HF export parity
-- `uv run python src/tools/hf/sample_next_move.py --model-dir ...` — inspect next-move probabilities
-- `uv run python src/tools/data/token_shard_stats.py [PATH]` — report `.npy` token counts and complete sequences
-- `uv run python src/tools/data/compute_cell_sampling.py --sparsity ...` — compute per-format sampling caps / heatmap
-- `uv run python src/tools/data/estimate_sampling_ratios.py` — print baseline format/ELO sampling ratios
-- `uv run python src/tools/data/process_tiny_dataset.py` — downsample + tokenize a tiny HF slice and push to the hub
-- `uv run python src/tools/data/explore_data_distribution.py` — generate dataset diagnostics under `analysis/`
+### Lichess Bot
+Run the chess bot that uses VLLM for move prediction:
+
+```bash
+cd src/lichess-bot
+python lichess-bot.py --config config.yml
+```
 
 ### Token Statistics
 - `data/tokens_v2` sequences of length 1025: train 54,368,123 · val 5,371
