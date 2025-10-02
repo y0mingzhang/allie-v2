@@ -356,12 +356,16 @@ if __name__ == "__main__":
     trained_tokens, step = 0, 0
     if config["checkpoint"]["load_path"]:
         step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, config["checkpoint"]["load_path"])
+        # Fast-forward the dataloader to match the checkpoint step
+        print(f"fast forwarding dataloader to step {step}", is_print_rank=is_wandb_rank)
+        data_loader.fast_forward_to_step(step)
     
     dist.barrier()
     gc.collect()
     torch.cuda.empty_cache()
     
     lr_scheduler = build_lr_scheduler(optimizer, config["training"])
+    lr_scheduler.step(step) # in case we loaded a checkpoint
 
     grad_clip_norm = config["training"].get("grad_clip_norm")
 

@@ -6,6 +6,7 @@
 uv sync
 
 uv pip install -e picotron --no-build-isolation
+uv pip install vllm --torch-backend=auto
 
 # Activate the virtual environment (ensures `which python` points to the venv)
 source .venv/bin/activate

@@ -479,7 +479,58 @@ def save_hf_artifacts(
     logger.info(f"✓ Export complete! Files saved to {out_path}")
 
 
-def upload_to_hub(output_dir: str, repo_id: str, private: bool = False) -> None:
+def _generate_readme(output_dir: str, repo_id: str, checkpoint_path: str, config_path: str) -> None:
+    """Generate a README.md file for the model."""
+    out_path = Path(output_dir)
+    hf_config_path = out_path / "config.json"
+
+    # Load HF config
+    with open(hf_config_path) as f:
+        hf_config = json.load(f)
+
+    # Load training config
+    with open(config_path) as f:
+        train_config = json.load(f)
+
+    # Load checkpoint to get training step
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    step = checkpoint.get("step", "unknown")
+
+    # Extract relevant info
+    model_type = hf_config.get("model_type", "unknown")
+    base_model = train_config.get("model", {}).get("hf_base", train_config.get("model", {}).get("name", "unknown"))
+    num_layers = hf_config.get("num_hidden_layers", "N/A")
+    hidden_size = hf_config.get("hidden_size", "N/A")
+    vocab_size = hf_config.get("vocab_size", "N/A")
+
+    # Get training details
+    batch_size = train_config.get("training", {}).get("batch_size", "N/A")
+    seq_length = train_config.get("training", {}).get("seq_length", "N/A")
+    lr = train_config.get("training", {}).get("lr", "N/A")
+
+    readme_content = f"""# {repo_id.split('/')[-1]}
+
+## Config
+- **Base Model**: {base_model}
+- **Model Type**: {model_type}
+- **Layers**: {num_layers}
+- **Hidden Size**: {hidden_size}
+- **Vocab Size**: {vocab_size}
+
+## Training
+- **Steps**: {step}
+- **Batch Size**: {batch_size}
+- **Sequence Length**: {seq_length}
+- **Learning Rate**: {lr}
+"""
+
+    readme_path = out_path / "README.md"
+    logger.info(f"Generating README at {readme_path}")
+    with open(readme_path, 'w') as f:
+        f.write(readme_content)
+
+
+def upload_to_hub(output_dir: str, repo_id: str, checkpoint_path: str, config_path: str, private: bool = False) -> None:
     """Upload exported model to HuggingFace Hub."""
     if not HF_HUB_AVAILABLE:
         raise ImportError(
@@ -490,6 +541,9 @@ def upload_to_hub(output_dir: str, repo_id: str, private: bool = False) -> None:
     logger.info(f"Uploading to HuggingFace Hub: {repo_id}")
     logger.info(f"Repository visibility: {'Private' if private else 'Public'}")
     logger.info(f"{'=' * 60}")
+
+    # Generate README before uploading
+    _generate_readme(output_dir, repo_id, checkpoint_path, config_path)
 
     api = HfApi()
 
@@ -557,7 +611,7 @@ def main() -> None:
 
         # Upload to HuggingFace Hub if requested
         if args.upload:
-            upload_to_hub(args.output_dir, args.repo_id, args.private)
+            upload_to_hub(args.output_dir, args.repo_id, args.checkpoint, args.config, args.private)
 
     except Exception as e:
         logger.error(f"Export failed: {e}")

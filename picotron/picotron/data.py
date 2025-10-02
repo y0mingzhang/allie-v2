@@ -6,7 +6,6 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler, Dataset
 import numpy as np
-from picotron.utils import print
 
 import picotron.process_group_manager as pgm
 
@@ -96,6 +95,52 @@ class NpyTokenDataset(Dataset):
         return {"input_ids": seq}
 
 
+class SkippableDistributedSampler(DistributedSampler):
+    """DistributedSampler with efficient skipping capability for fast-forward resume.
+
+    Allows skipping ahead to a specific sample position without iterating through all samples.
+    The skip is applied once on the next __iter__() call, then automatically reset.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.skip_samples = 0
+
+    def set_skip(self, num_samples: int):
+        """Set the number of samples to skip on the next __iter__() call."""
+        self.skip_samples = num_samples
+
+    def __iter__(self):
+        # Generate indices using parent class logic
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            indices = torch.randperm(len(self.dataset), generator=g).tolist()
+        else:
+            indices = list(range(len(self.dataset)))
+
+        if not self.drop_last:
+            # Add extra samples to make it evenly divisible
+            padding_size = self.total_size - len(indices)
+            if padding_size <= len(indices):
+                indices += indices[:padding_size]
+            else:
+                indices += (indices * ((padding_size + len(indices) - 1) // len(indices)))[:padding_size]
+        else:
+            # Remove tail of data to make it evenly divisible
+            indices = indices[:self.total_size]
+
+        # Subsample for this rank
+        indices = indices[self.rank:self.total_size:self.num_replicas]
+
+        # Apply skip if set, then reset it
+        if self.skip_samples > 0:
+            indices = indices[self.skip_samples:]
+            self.skip_samples = 0
+
+        return iter(indices)
+
+
 class MicroBatchDataLoader(DataLoader):
     def __init__(self, micro_batch_size, seq_length, npy_path, grad_acc_steps, device, num_workers, num_samples=None, pin_memory=True):
         self.micro_batch_size = micro_batch_size
@@ -108,7 +153,7 @@ class MicroBatchDataLoader(DataLoader):
 
         self.dataset = NpyTokenDataset(npy_glob_or_path=npy_path, seq_length=seq_length, num_samples=num_samples)
 
-        self.sampler = DistributedSampler(
+        self.sampler = SkippableDistributedSampler(
             self.dataset,
             num_replicas=pgm.process_group_manager.dp_world_size,
             rank=pgm.process_group_manager.dp_rank,
@@ -140,6 +185,37 @@ class MicroBatchDataLoader(DataLoader):
             "position_ids": position_ids,
             "hidden_states": None,
         }
+
+    def fast_forward_to_step(self, target_step):
+        """
+        Fast-forward the dataloader to a specific training step.
+
+        Args:
+            target_step (int): The training step to fast-forward to
+        """
+        # Each training step consumes grad_acc_steps micro-batches
+        batches_to_skip = target_step * self.grad_acc_steps
+
+        # Calculate which epoch we should be in and how many batches to skip within that epoch
+        # Use batch-based calculation to properly account for DistributedSampler padding
+        # Use ceil to account for partial batches (padding makes epochs evenly divisible)
+        import math
+        batches_per_epoch = math.ceil(len(self.sampler) / self.micro_batch_size)
+        epoch_offset = batches_to_skip // batches_per_epoch
+        batches_within_epoch = batches_to_skip % batches_per_epoch
+
+        # Convert batches to samples for the skip operation
+        samples_within_epoch = batches_within_epoch * self.micro_batch_size
+
+        # Set the epoch (this affects the RNG seed for shuffling)
+        self.sampler.set_epoch(epoch_offset)
+
+        # Set the skip position (will be applied on next __iter__ call)
+        # Note: set_skip expects number of SAMPLES to skip in the sampler's index space
+        self.sampler.set_skip(samples_within_epoch)
+
+        # Reset the iterator so it picks up the new epoch and skip settings
+        self._iterator = None
 
     def __iter__(self):
         if self._iterator is None:
