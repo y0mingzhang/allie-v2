@@ -1,4 +1,4 @@
-# chess-v2
+# allie-v2
 
 ### Quickstart
 ```bash
@@ -24,6 +24,11 @@ VLLM_TARGET_DEVICE=cpu python setup.py install
 cd src/lichess-bot
 uv pip install -r requirements.txt
 ```
+
+### Allie (v2)
+We have pre-trained a Qwen 3 1.7b model on 57B Lichess tokens that drastically outperforms Allie and plays all time control formats. We also cleaned up the inference pipeline to use vLLM.
+
+![Performance Analysis](analysis/yimingzhang-qwen-3-1.7b-57b-cool-from-66550-step96800/move_matching.png)
 
 ### Training
 - Script: `scripts/train.sh`

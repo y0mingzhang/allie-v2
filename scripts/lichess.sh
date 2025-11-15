@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name="allie"
-#SBATCH --partition="preempt"
-#SBATCH --time=8:00:00
+#SBATCH --partition="cpu"
+#SBATCH --time=2-00:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=50GB
 #SBATCH --signal=B:SIGUSR1@60
