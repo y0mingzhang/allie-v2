@@ -1,28 +1,39 @@
 # allie-v2
 
 ### Quickstart
-```bash
-# Create and sync the virtual environment from pyproject
-uv sync
 
-uv pip install setuptools
-# Activate the virtual environment (ensures `which python` points to the venv)
+#### Environment Setup
+```bash
+# Create virtual environment with Python 3.9-3.12 (NOT 3.13, vLLM has compatibility issues)
+uv venv --python 3.12
 source .venv/bin/activate
 
-**For training:**
+# Install project dependencies
+uv pip install -e .
+```
+
+#### For Training
+```bash
+uv pip install setuptools
 uv pip install -e picotron --no-build-isolation
 uv pip install vllm --torch-backend=auto
+```
 
-**For cpu-only inference on lichess:**
-git clone https://github.com/vllm-project/vllm.git vllm_source
+#### For CPU-Only Inference on Lichess
+vLLM is pinned as a git submodule to ensure a working version for CPU inference.
+```bash
+# Initialize submodules (vllm_source and lichess-bot)
+git submodule update --init --recursive
+
+# Build vLLM for CPU
 cd vllm_source
-
 uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match --torch-backend cpu
 uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu
-VLLM_TARGET_DEVICE=cpu python setup.py install
+VLLM_TARGET_DEVICE=cpu uv pip install -e . --no-build-isolation
+cd ..
 
-cd src/lichess-bot
-uv pip install -r requirements.txt
+# Fix shared memory permission issue on multi-user systems
+uv pip install "model-hosting-container-standards>=0.1.12,<1.0.0"
 ```
 
 ### Allie (v2)
@@ -48,13 +59,36 @@ We have pre-trained a Qwen 3 1.7b model on 57B Lichess tokens that drastically o
   ```
 - Outputs `model.safetensors` and `config.json`; pass `--tokenizer-dir` to copy tokenizer files
 
-### Lichess Bot
-Run the chess bot that uses VLLM for move prediction:
-
+### Model Testing
+Verify vLLM model loading and inference correctness:
 ```bash
+python src/tools/eval/test_vllm_model.py --model yimingzhang/qwen-3-1.7b-57b-cool-from-66550-step96800
+```
+Tests that the model produces sensible moves for known opening positions.
+
+### Lichess Bot
+The lichess-bot integration uses a custom vLLM engine to generate chess moves.
+
+#### Setup
+lichess-bot is integrated as a git submodule with custom files:
+- `vllm_engine.py` - HTTP API client for vLLM server
+- `config.yml` - Bot configuration (not tracked, contains API token)
+- `homemade.py` - Modified to import VLLMEngine
+
+#### Running the Bot
+```bash
+# Start vLLM server (in one terminal)
+source .venv/bin/activate
+vllm serve yimingzhang/qwen-3-1.7b-57b-cool-from-66550-step96800 \
+  --max-model-len 1024 --enforce-eager --port 12398
+
+# Run lichess-bot (in another terminal)
+source .venv/bin/activate
 cd src/lichess-bot
 python lichess-bot.py --config config.yml
 ```
+
+See `scripts/lichess.sh` for SLURM job configuration.
 
 ### Token Statistics
 - `data/tokens_v2` sequences of length 1025: train 54,368,123 · val 5,371

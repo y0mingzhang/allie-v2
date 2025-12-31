@@ -1,3 +1,6 @@
 [submodule "src/lichess-bot"]
 	path = src/lichess-bot
 	url = https://github.com/lichess-bot-devs/lichess-bot.git
+[submodule "vllm_source"]
+	path = vllm_source
+	url = https://github.com/vllm-project/vllm.git
