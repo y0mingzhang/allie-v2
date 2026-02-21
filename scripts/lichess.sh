@@ -9,7 +9,7 @@
 
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$SLURM_SUBMIT_DIR"
 BOT_DIR="$ROOT_DIR/src/lichess-bot"
 MODEL="models/yimingzhang/qwen-3-1.7b-57b-cool-from-66550-step96800"
 
