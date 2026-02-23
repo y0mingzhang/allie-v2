@@ -20,11 +20,13 @@ export VLLM_PORT=12404
 
 VLLM_LOG=/tmp/vllm_lichess_$$.log
 VLLM_PID=0
+BOT_PID=0
 
 # --- signal handling ---
 
 sig_handler_USR1() {
     echo "SIGUSR1 trapped at $(date), requeueing job $SLURM_JOB_ID"
+    [[ $BOT_PID -ne 0 ]] && kill -TERM "$BOT_PID" 2>/dev/null || true
     kill -TERM $(jobs -p) 2>/dev/null || true
     wait
     scontrol requeue "$SLURM_JOB_ID"
@@ -34,6 +36,7 @@ trap 'sig_handler_USR1' SIGUSR1
 
 cleanup() {
     echo "Cleaning up..."
+    [[ $BOT_PID -ne 0 ]] && kill "$BOT_PID" 2>/dev/null || true
     kill $(jobs -p) 2>/dev/null || true
     wait
 }
@@ -70,7 +73,6 @@ ensure_vllm() {
         return 0
     fi
     echo "vLLM is down, restarting..."
-    VLLM_LOG=/tmp/vllm_lichess_$$.log
     start_vllm
 }
 
@@ -96,17 +98,35 @@ wait_for_lichess
 
 backoff=60
 rapid_failures=0
+vllm_failures=0
 while true; do
-    ensure_vllm || { sleep 60; continue; }
+    if ! ensure_vllm; then
+        vllm_failures=$(( vllm_failures + 1 ))
+        if (( vllm_failures >= 3 )); then
+            echo "vLLM failed $vllm_failures times, cooling down 10 minutes..."
+            sleep 600
+            vllm_failures=0
+        else
+            sleep 60
+        fi
+        continue
+    fi
+    vllm_failures=0
 
     start_time=$SECONDS
-    (cd "$BOT_DIR" && python lichess-bot.py --config config.yml)
+    cd "$BOT_DIR"
+    python lichess-bot.py --config config.yml &
+    BOT_PID=$!
+    wait "$BOT_PID"
     code=$?
+    BOT_PID=0
+    cd "$ROOT_DIR"
     runtime=$(( SECONDS - start_time ))
     echo "Bot exited with code $code after ${runtime}s"
 
     if (( runtime < 30 )); then
         rapid_failures=$(( rapid_failures + 1 ))
+        backoff=$(( backoff < 600 ? backoff * 2 : 600 ))
         if (( rapid_failures >= 5 )); then
             echo "Too many rapid failures ($rapid_failures), cooling down 10 minutes..."
             sleep 600
@@ -119,15 +139,7 @@ while true; do
     fi
 
     sleep "$backoff"
-
-    if ! curl -sf -o /dev/null --max-time 5 \
-        -H "Authorization: Bearer $LICHESS_TOKEN" \
-        https://lichess.org/api/account 2>/dev/null; then
-        wait_for_lichess
-        backoff=60
-    else
-        backoff=$(( backoff < 600 ? backoff * 2 : 600 ))
-    fi
+    wait_for_lichess
 done &
 
 wait
