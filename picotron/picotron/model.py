@@ -4,14 +4,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from picotron.context_parallel import context_parallel
-from flash_attn.flash_attn_interface import flash_attn_func
-from flash_attn.layers.rotary import apply_rotary_emb
-from flash_attn.ops.triton.layer_norm import layer_norm_fn
 import picotron.process_group_manager as pgm
+
+_flash_attn_available = False
+if os.getenv("FLASH_ATTEN", "1") == "1":
+    try:
+        from flash_attn.flash_attn_interface import flash_attn_func
+        from flash_attn.layers.rotary import apply_rotary_emb
+        from flash_attn.ops.triton.layer_norm import layer_norm_fn
+
+        _flash_attn_available = True
+    except ImportError:
+        pass
 
 
 def apply_rotary_pos_emb(x, cos, sin):
-    #TODO: Maybe do class RotaryEmbedding(nn.Module) later
+    # TODO: Maybe do class RotaryEmbedding(nn.Module) later
     batch_size, num_head, seq_length, head_dim = x.size()
 
     def _prepare(cache):
@@ -45,17 +53,35 @@ def apply_rotary_pos_emb(x, cos, sin):
     x = x * cos + rotate_half * sin
     return x
 
+
+def get_rope_theta(config, default=500000.0):
+    if hasattr(config, "rope_theta"):
+        return config.rope_theta
+    rp = getattr(config, "rope_parameters", None)
+    if isinstance(rp, dict) and "rope_theta" in rp:
+        return rp["rope_theta"]
+    return default
+
+
 def get_cos_sin(seq_length, head_dim, base=500000.0):
-    assert head_dim%2==0
+    assert head_dim % 2 == 0
     # Results on CUDA and CPU are different even with the same formula, To match transformers implementation. frequency should be computed on CPU
-    theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
-    dtype = torch.bfloat16 if os.getenv('DTYPE', 'bfloat16') == 'bfloat16' else torch.float32
+    theta = 1.0 / (
+        base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to("cpu") / head_dim)
+    )
+    dtype = torch.bfloat16 if os.getenv("DTYPE", "bfloat16") == "bfloat16" else torch.float32
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device('cuda', local_rank) if os.getenv('DEVICE', 'cuda') == 'cuda' else torch.device('cpu')
-    position = torch.arange(seq_length).to(device).unsqueeze(1).float() # [seq_length, 1]
+    device = (
+        torch.device("cuda", local_rank)
+        if os.getenv("DEVICE", "cuda") == "cuda"
+        else torch.device("cpu")
+    )
+    position = torch.arange(seq_length).to(device).unsqueeze(1).float()  # [seq_length, 1]
     # To match transformers implementation. m * theta should be computed on GPU
     theta = theta.to(device)
-    return torch.cos(position.float()*theta.float()).to(dtype).repeat(1,2), torch.sin(position.float()*theta.float()).to(dtype).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
+    return torch.cos(position.float() * theta.float()).to(dtype).repeat(1, 2), torch.sin(
+        position.float() * theta.float()
+    ).to(dtype).repeat(1, 2)  # [seq_length, head_dim], [seq_length, head_dim]
 
 
 def get_activation_fn(name_or_callable):
@@ -70,19 +96,27 @@ def get_activation_fn(name_or_callable):
         return F.gelu
     if name == "relu":
         return F.relu
+    if name == "relu2":
+        return lambda x: F.relu(x).square()
     if name in {"identity", "linear"}:
         return lambda x: x
     raise ValueError(f"Unsupported activation function: {name_or_callable}")
 
-def flash_attention(q, k, v, causal = True):
-    q = q.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
-    k = k.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
-    v = v.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
-    return flash_attn_func(q, k, v, causal=causal)
+
+def flash_attention(q, k, v, causal=True):
+    q = q.permute(0, 2, 1, 3)
+    k = k.permute(0, 2, 1, 3)
+    v = v.permute(0, 2, 1, 3)
+    if _flash_attn_available:
+        return flash_attn_func(q, k, v, causal=causal)
+    out = F.scaled_dot_product_attention(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=causal
+    )
+    return out.transpose(1, 2)
+
 
 class TritonRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-5, device=None, dtype=None):
-        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(hidden_size))
@@ -93,8 +127,20 @@ class TritonRMSNorm(nn.Module):
         nn.init.ones_(self.weight)
 
     def forward(
-        self, hidden_states, residual=None, dropout_p=0.0, prenorm=False, residual_in_fp32=False, return_dropout_mask=False
+        self,
+        hidden_states,
+        residual=None,
+        dropout_p=0.0,
+        prenorm=False,
+        residual_in_fp32=False,
+        return_dropout_mask=False,
     ):
+        if not _flash_attn_available:
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            variance = hidden_states.pow(2).mean(-1, keepdim=True)
+            hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+            return self.weight * hidden_states.to(input_dtype)
         return layer_norm_fn(
             hidden_states,
             self.weight,
@@ -108,6 +154,7 @@ class TritonRMSNorm(nn.Module):
             return_dropout_mask=return_dropout_mask,
         )
 
+
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-5):
         """
@@ -118,7 +165,7 @@ class LlamaRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
         self.reset_parameters()
-    
+
     def reset_parameters(self):
         nn.init.ones_(self.weight)
 
@@ -129,6 +176,7 @@ class LlamaRMSNorm(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
+
 class Attention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -136,10 +184,18 @@ class Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_key_values = config.num_key_value_heads
         self.head_dim = self.hidden_size // self.num_heads
-        assert config.num_attention_heads % pgm.process_group_manager.tp_world_size == 0, "num_attention_heads should be divisible by tp world size"
-        assert config.num_key_value_heads % pgm.process_group_manager.tp_world_size == 0, "num_key_value_heads should be divisible by  tp world size"
-        self.num_local_heads = config.num_attention_heads // pgm.process_group_manager.tp_world_size # TP parallelism
-        self.num_local_kv_heads = config.num_key_value_heads // pgm.process_group_manager.tp_world_size # TP parallelism
+        assert config.num_attention_heads % pgm.process_group_manager.tp_world_size == 0, (
+            "num_attention_heads should be divisible by tp world size"
+        )
+        assert config.num_key_value_heads % pgm.process_group_manager.tp_world_size == 0, (
+            "num_key_value_heads should be divisible by  tp world size"
+        )
+        self.num_local_heads = (
+            config.num_attention_heads // pgm.process_group_manager.tp_world_size
+        )  # TP parallelism
+        self.num_local_kv_heads = (
+            config.num_key_value_heads // pgm.process_group_manager.tp_world_size
+        )  # TP parallelism
 
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_values * self.head_dim, bias=False)
@@ -168,41 +224,71 @@ class Attention(nn.Module):
         q = self.q_proj(x)  # [batch_size, seq_length, num_heads*head_dim]
         k = self.k_proj(x)  # [batch_size, seq_length, num_key_values*head_dim]
         v = self.v_proj(x)  # [batch_size, seq_length, num_key_values*head_dim]
-        if os.getenv('FLASH_ATTEN', '1') != '1':
-            q = q.view(batch_size, seq_length, self.num_local_heads, self.head_dim).transpose(1, 2)       # [batch_size, num_heads, seq_length, head_dim]
-            k = k.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
-            v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
+        if os.getenv("FLASH_ATTEN", "1") != "1":
+            q = q.view(batch_size, seq_length, self.num_local_heads, self.head_dim).transpose(
+                1, 2
+            )  # [batch_size, num_heads, seq_length, head_dim]
+            k = k.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(
+                1, 2
+            )  # [batch_size, num_key_values, seq_length, head_dim]
+            v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(
+                1, 2
+            )  # [batch_size, num_key_values, seq_length, head_dim]
             q = apply_rotary_pos_emb(q, cos, sin)
             k = apply_rotary_pos_emb(k, cos, sin)
         else:
-            q = q.view(batch_size, seq_length, self.num_local_heads, self.head_dim)       # [batch_size, seq_length, num_heads, head_dim]
-            k = k.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim)  # [batch_size, seq_length, num_key_values, head_dim]
-            q = apply_rotary_emb(q,cos[:, :self.head_dim // 2], sin[:, :self.head_dim // 2],interleaved=False) # [batch_size, seq_length, num_heads, head_dim]
-            k = apply_rotary_emb(k,cos[:, :self.head_dim // 2], sin[:, :self.head_dim // 2],interleaved=False) # [batch_size, seq_length, num_key_values, head_dim]
-            q = q.transpose(1, 2)                                                                   # [batch_size, num_heads, seq_length, head_dim]
-            k = k.transpose(1, 2)                                                                   # [batch_size, num_key_values, seq_length, head_dim]
-            v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1,2)   # [batch_size, num_key_values, seq_length, head_dim]
+            q = q.view(
+                batch_size, seq_length, self.num_local_heads, self.head_dim
+            )  # [batch_size, seq_length, num_heads, head_dim]
+            k = k.view(
+                batch_size, seq_length, self.num_local_kv_heads, self.head_dim
+            )  # [batch_size, seq_length, num_key_values, head_dim]
+            q = apply_rotary_emb(
+                q, cos[:, : self.head_dim // 2], sin[:, : self.head_dim // 2], interleaved=False
+            )  # [batch_size, seq_length, num_heads, head_dim]
+            k = apply_rotary_emb(
+                k, cos[:, : self.head_dim // 2], sin[:, : self.head_dim // 2], interleaved=False
+            )  # [batch_size, seq_length, num_key_values, head_dim]
+            q = q.transpose(1, 2)  # [batch_size, num_heads, seq_length, head_dim]
+            k = k.transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
+            v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(
+                1, 2
+            )  # [batch_size, num_key_values, seq_length, head_dim]
 
-        k = k.repeat_interleave(self.num_local_heads // self.num_local_kv_heads, dim=1) # [batch_size, num_heads, seq_length, head_dim]
-        v = v.repeat_interleave(self.num_local_heads // self.num_local_kv_heads, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        k = k.repeat_interleave(
+            self.num_local_heads // self.num_local_kv_heads, dim=1
+        )  # [batch_size, num_heads, seq_length, head_dim]
+        v = v.repeat_interleave(
+            self.num_local_heads // self.num_local_kv_heads, dim=1
+        )  # [batch_size, num_heads, seq_length, head_dim]
 
-        causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1.
+        causal = (
+            True if q.size(2) == k.size(2) else False
+        )  # During decoding phase. The lenghth of q is usually 1.
 
         # TODO: replace everything with flex attention
-        if os.getenv('CONTEXT_PARALLEL', '0') == '1':
+        if os.getenv("CONTEXT_PARALLEL", "0") == "1":
             # Ring attention for context parallelism
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
-            out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
-        elif os.getenv('FLASH_ATTEN', '1') == '1':
+            out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(
+                1, 2
+            )  # [batch_size, seq_length, num_heads, head_dim]
+        elif os.getenv("FLASH_ATTEN", "1") == "1":
             # flash attention, this is faster!
-            out = flash_attention(q, k, v, causal = causal) # [batch_size, seq_length, num_heads, head_dim]
+            out = flash_attention(
+                q, k, v, causal=causal
+            )  # [batch_size, seq_length, num_heads, head_dim]
         else:
             # Pytorch scaled dot product attention
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=causal) # [batch_size, num_heads, seq_length, head_dim]
-            out = out.transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
+            out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=causal
+            )  # [batch_size, num_heads, seq_length, head_dim]
+            out = out.transpose(1, 2)  # [batch_size, seq_length, num_heads, head_dim]
 
-        out = out.reshape(batch_size, seq_length, self.num_local_heads * self.head_dim) # [batch_size, seq_length, hidden_dim]
-        out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
+        out = out.reshape(
+            batch_size, seq_length, self.num_local_heads * self.head_dim
+        )  # [batch_size, seq_length, hidden_dim]
+        out = self.out_proj(out)  # [batch_size, seq_length, hidden_dim]
         return out
 
 
@@ -213,8 +299,12 @@ class Qwen3Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_key_values = config.num_key_value_heads
         self.head_dim = getattr(config, "head_dim", self.hidden_size // self.num_heads)
-        assert config.num_attention_heads % pgm.process_group_manager.tp_world_size == 0, "num_attention_heads should be divisible by tp world size"
-        assert config.num_key_value_heads % pgm.process_group_manager.tp_world_size == 0, "num_key_value_heads should be divisible by  tp world size"
+        assert config.num_attention_heads % pgm.process_group_manager.tp_world_size == 0, (
+            "num_attention_heads should be divisible by tp world size"
+        )
+        assert config.num_key_value_heads % pgm.process_group_manager.tp_world_size == 0, (
+            "num_key_value_heads should be divisible by  tp world size"
+        )
 
         self.num_local_heads = self.num_heads // pgm.process_group_manager.tp_world_size
         self.num_local_kv_heads = self.num_key_values // pgm.process_group_manager.tp_world_size
@@ -222,18 +312,26 @@ class Qwen3Attention(nn.Module):
 
         use_bias = getattr(config, "attention_bias", False)
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=use_bias)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_key_values * self.head_dim, bias=use_bias)
-        self.v_proj = nn.Linear(config.hidden_size, self.num_key_values * self.head_dim, bias=use_bias)
+        self.k_proj = nn.Linear(
+            config.hidden_size, self.num_key_values * self.head_dim, bias=use_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, self.num_key_values * self.head_dim, bias=use_bias
+        )
         self.out_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=use_bias)
 
-        HeadRMSNorm = TritonRMSNorm if os.getenv('FLASH_ATTEN', '1') == '1' else LlamaRMSNorm
+        HeadRMSNorm = TritonRMSNorm if os.getenv("FLASH_ATTEN", "1") == "1" else LlamaRMSNorm
         self.q_norm = HeadRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = HeadRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.attention_dropout = getattr(config, "attention_dropout", 0.0)
 
         layer_types = getattr(config, "layer_types", None)
         self.sliding_window = None
-        if layer_types is not None and layer_idx < len(layer_types) and layer_types[layer_idx] == "sliding_attention":
+        if (
+            layer_types is not None
+            and layer_idx < len(layer_types)
+            and layer_types[layer_idx] == "sliding_attention"
+        ):
             self.sliding_window = getattr(config, "sliding_window", None)
 
         self.reset_parameters()
@@ -257,6 +355,8 @@ class Qwen3Attention(nn.Module):
             torch.nn.init.zeros_(self.v_proj.bias)
         if self.out_proj.bias is not None:
             torch.nn.init.zeros_(self.out_proj.bias)
+        self.q_norm.reset_parameters()
+        self.k_norm.reset_parameters()
 
     def forward(self, x, cos, sin, attention_mask=None, position_ids=None):
         batch_size, seq_length, _ = x.size()
@@ -275,7 +375,7 @@ class Qwen3Attention(nn.Module):
         cos = cos[:seq_length]
         sin = sin[:seq_length]
 
-        if os.getenv('FLASH_ATTEN', '1') != '1':
+        if os.getenv("FLASH_ATTEN", "1") != "1":
             cos = cos.unsqueeze(0).unsqueeze(1).repeat(1, self.num_local_heads, 1, 1)
             sin = sin.unsqueeze(0).unsqueeze(1).repeat(1, self.num_local_heads, 1, 1)
             q = q.permute(0, 2, 1, 3)
@@ -296,10 +396,10 @@ class Qwen3Attention(nn.Module):
         v = v.repeat_interleave(self.num_key_value_groups, dim=1)
 
         causal = q.size(2) == k.size(2)
-        if os.getenv('CONTEXT_PARALLEL', '0') == '1':
+        if os.getenv("CONTEXT_PARALLEL", "0") == "1":
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
             out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(1, 2)
-        elif os.getenv('FLASH_ATTEN', '1') == '1':
+        elif os.getenv("FLASH_ATTEN", "1") == "1":
             out = flash_attention(q, k, v, causal=causal)
         else:
             out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
@@ -311,6 +411,7 @@ class Qwen3Attention(nn.Module):
         out = self.out_proj(out)
         return out
 
+
 class MLP(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
@@ -319,7 +420,7 @@ class MLP(nn.Module):
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
         self.reset_parameters()
-    
+
     def reset_parameters(self):
 
         def _init_weights(tensor):
@@ -330,9 +431,9 @@ class MLP(nn.Module):
         _init_weights(self.up_proj.weight)
         _init_weights(self.gate_proj.weight)
         _init_weights(self.down_proj.weight)
- 
+
     def forward(self, x):
-        #TODO: dont do single line operations as it is harder to debug
+        # TODO: dont do single line operations as it is harder to debug
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -361,6 +462,7 @@ class Qwen3MLP(nn.Module):
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
+
 class FinalProjection(nn.Module):
     def __init__(self, hidden_size, vocab_size, bias=False):
         super().__init__()
@@ -387,28 +489,34 @@ class FinalProjection(nn.Module):
     def forward(self, x):
         return F.linear(x, self.weight, self.bias)
 
+
 class DecoderLayer(nn.Module):
     # RMSNorm -> Attention -> Residual -> RMSNorm -> MLP -> Residual
     def __init__(self, config, layer_idx):
         super().__init__()
-        RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
+        RMSNorm = LlamaRMSNorm if os.getenv("FLASH_ATTEN", "1") != "1" else TritonRMSNorm
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.attention = Attention(config, layer_idx = layer_idx)
+        self.attention = Attention(config, layer_idx=layer_idx)
         self.mlp = MLP(config)
         self.layer_idx = layer_idx
         head_dim = config.hidden_size // config.num_attention_heads
-        self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim , base=config.rope_theta) # [max_position_embeddings, head_dim]
+        self.cos, self.sin = get_cos_sin(
+            config.max_position_embeddings, head_dim=head_dim, base=get_rope_theta(config)
+        )  # [max_position_embeddings, head_dim]
 
         # For context parallelism, we split the input. We need to get the correct cos and sin for each split
         self.cos, self.sin = context_parallel.update_rope_for_context_parallel(self.cos, self.sin)
 
-    def forward(self, x, attention_mask = None, position_ids = None):
-        #TODO: Use the default position_ids for RoPE during training. If we have time, work on generation
-        cos, sin = self.cos, self.sin 
-        x = x + self.attention(self.input_layernorm(x), cos, sin, attention_mask, position_ids) # Attention 
-        x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
+    def forward(self, x, attention_mask=None, position_ids=None):
+        # TODO: Use the default position_ids for RoPE during training. If we have time, work on generation
+        cos, sin = self.cos, self.sin
+        x = x + self.attention(
+            self.input_layernorm(x), cos, sin, attention_mask, position_ids
+        )  # Attention
+        x = x + self.mlp(self.post_attention_layernorm(x))  # MLP
         return x
+
 
 class Embedding(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, padding_idx=None):
@@ -416,7 +524,7 @@ class Embedding(nn.Module):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
-        
+
         self.weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
         self.reset_parameters()
 
@@ -424,37 +532,44 @@ class Embedding(nn.Module):
         torch.nn.init.normal_(self.weight, mean=0.0, std=1.0)
 
     def forward(self, x):
-        return F.embedding(x, self.weight, self.padding_idx,)
+        return F.embedding(
+            x,
+            self.weight,
+            self.padding_idx,
+        )
+
 
 class Llama(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
-        # sanity check 
-        assert config.hidden_size % config.num_attention_heads==0
-        assert config.num_attention_heads % config.num_key_value_heads==0 
-        
+        # sanity check
+        assert config.hidden_size % config.num_attention_heads == 0
+        assert config.num_attention_heads % config.num_key_value_heads == 0
+
         # params
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.num_key_values = config.num_key_value_heads 
-        self.head_dim = self.hidden_size//self.num_heads
+        self.num_key_values = config.num_key_value_heads
+        self.head_dim = self.hidden_size // self.num_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.num_layers = config.num_hidden_layers
         self.model_config = config
-        
+
         # modules
         self.embedding = Embedding(self.vocab_size, self.hidden_size)
-        self.decoder_layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
+        self.decoder_layers = nn.ModuleList(
+            [DecoderLayer(config, layer_idx=i) for i in range(self.num_layers)]
+        )
         self.final_proj = FinalProjection(self.hidden_size, self.vocab_size, bias=False)
-        RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
+        RMSNorm = LlamaRMSNorm if os.getenv("FLASH_ATTEN", "1") != "1" else TritonRMSNorm
         self.final_norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
 
         self.reset_parameters()
 
     def reset_parameters(self):
         self.embedding.reset_parameters()
-        
+
         for layer in self.decoder_layers:
             layer.input_layernorm.reset_parameters()
             layer.attention.reset_parameters()
@@ -470,21 +585,23 @@ class Llama(nn.Module):
             x = layer(x)  # [batch_size, seq_length, hidden_dim]
         x = self.final_norm(x)
         logits = self.final_proj(x)
-        
+
         return logits  # [batch_size, seq_length, vocab_size]
 
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
+        RMSNorm = LlamaRMSNorm if os.getenv("FLASH_ATTEN", "1") != "1" else TritonRMSNorm
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.attention = Qwen3Attention(config, layer_idx=layer_idx)
         self.mlp = Qwen3MLP(config)
         self.layer_idx = layer_idx
         head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim, base=config.rope_theta)
+        self.cos, self.sin = get_cos_sin(
+            config.max_position_embeddings, head_dim=head_dim, base=get_rope_theta(config)
+        )
         self.cos, self.sin = context_parallel.update_rope_for_context_parallel(self.cos, self.sin)
 
     def forward(self, x, attention_mask=None, position_ids=None):
@@ -508,12 +625,23 @@ class Qwen3Model(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.num_layers = config.num_hidden_layers
         self.model_config = config
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
         self.embedding = Embedding(self.vocab_size, self.hidden_size)
-        self.decoder_layers = nn.ModuleList([Qwen3DecoderLayer(config, layer_idx=i) for i in range(self.num_layers)])
-        RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
+        self.decoder_layers = nn.ModuleList(
+            [Qwen3DecoderLayer(config, layer_idx=i) for i in range(self.num_layers)]
+        )
+        RMSNorm = LlamaRMSNorm if os.getenv("FLASH_ATTEN", "1") != "1" else TritonRMSNorm
         self.final_norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
-        self.final_proj = FinalProjection(self.hidden_size, self.vocab_size, bias=False)
+        if self.tie_word_embeddings:
+            self.final_proj = None
+        else:
+            self.final_proj = FinalProjection(self.hidden_size, self.vocab_size, bias=False)
+
+        if getattr(config, "value_head", False):
+            self.value_head = nn.Linear(self.hidden_size, 1)
+        else:
+            self.value_head = None
 
         self.reset_parameters()
 
@@ -526,13 +654,31 @@ class Qwen3Model(nn.Module):
             layer.post_attention_layernorm.reset_parameters()
             layer.mlp.reset_parameters()
 
+        if getattr(self.model_config, "zero_init_proj", False):
+            for layer in self.decoder_layers:
+                nn.init.zeros_(layer.attention.out_proj.weight)
+                nn.init.zeros_(layer.mlp.down_proj.weight)
+
         self.final_norm.reset_parameters()
-        self.final_proj.reset_parameters()
+        if self.final_proj is not None:
+            self.final_proj.reset_parameters()
 
     def forward(self, input_ids, attention_mask=None, position_ids: torch.Tensor = None):
+        # Clamp input IDs to vocab size (value training may have result tokens > vocab_size)
+        if input_ids.max() >= self.vocab_size:
+            input_ids = input_ids.clamp(max=self.vocab_size - 1)
         x = self.embedding(input_ids)
+        x0 = x if getattr(self.model_config, "embed_shortcut", False) else None
         for layer in self.decoder_layers:
             x = layer(x, attention_mask=attention_mask, position_ids=position_ids)
+            if x0 is not None:
+                x = x + x0
         x = self.final_norm(x)
-        logits = self.final_proj(x)
+        if self.tie_word_embeddings:
+            logits = F.linear(x, self.embedding.weight)
+        else:
+            logits = self.final_proj(x)
+        if getattr(self, "value_head", None) is not None:
+            v = self.value_head(x)
+            return logits, torch.tanh(v.float()).squeeze(-1)
         return logits

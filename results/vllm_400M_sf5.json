@@ -1,0 +1,12 @@
+{
+  "model": "/tmp/export_400M_v3_step15000",
+  "sf_level": 5,
+  "elo_conditioning": 2000,
+  "n_games": 20,
+  "wins": 1,
+  "draws": 5,
+  "losses": 14,
+  "win_rate": 0.05,
+  "avg_cpl": 0.0,
+  "time_per_game": 0.7543940901756286
+}

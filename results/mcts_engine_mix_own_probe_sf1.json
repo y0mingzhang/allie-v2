@@ -1,0 +1,9 @@
+{
+  "prompt_elo": 3000,
+  "sf_skill": 1,
+  "num_simulations": 50,
+  "wins": 12,
+  "draws": 1,
+  "losses": 7,
+  "score": 62.5
+}

@@ -1,0 +1,98 @@
+{
+  "r2_hi_lr": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 1.9766,
+      "val_loss": 2.0156,
+      "move_acc": 0.3958,
+      "loss@100": 7.6094,
+      "loss@500": 2.5215,
+      "loss@1000": 1.9766
+    },
+    "elapsed": 241.49942708015442
+  },
+  "r2_hi_lr_deep": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 1.8887,
+      "val_loss": 1.9375,
+      "move_acc": 0.4103,
+      "loss@100": 7.1484,
+      "loss@500": 2.3633,
+      "loss@1000": 1.8887
+    },
+    "elapsed": 302.78927874565125
+  },
+  "r2_very_hi_lr": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 1.9199,
+      "val_loss": 1.9688,
+      "move_acc": 0.4078,
+      "loss@100": 5.6406,
+      "loss@500": 2.4004,
+      "loss@1000": 1.9199
+    },
+    "elapsed": 236.53870844841003
+  },
+  "r2_hi_lr_mw3": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 2.03,
+      "val_loss": 2.0312,
+      "move_acc": 0.3952,
+      "loss@100": 7.5217,
+      "loss@500": 2.6625,
+      "loss@1000": 2.03
+    },
+    "elapsed": 239.3837890625
+  },
+  "r2_kitchen_sink": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 1.9185,
+      "val_loss": 1.9375,
+      "move_acc": 0.4138,
+      "loss@100": 6.8736,
+      "loss@500": 2.4455,
+      "loss@1000": 1.9185
+    },
+    "elapsed": 302.6970705986023
+  },
+  "r2_wider_768": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 1.9102,
+      "val_loss": 1.9766,
+      "move_acc": 0.4055,
+      "loss@100": 10.5547,
+      "loss@500": 2.5098,
+      "loss@1000": 1.9102
+    },
+    "elapsed": 420.24092841148376
+  },
+  "r2_hi_lr_long_warm": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 2.1113,
+      "val_loss": 2.125,
+      "move_acc": 0.3757,
+      "loss@100": 12.0,
+      "loss@500": 2.7637,
+      "loss@1000": 2.1113
+    },
+    "elapsed": 263.8142240047455
+  },
+  "r2_hi_lr_zloss": {
+    "ok": true,
+    "metrics": {
+      "final_loss": 2.0117,
+      "val_loss": 2.0312,
+      "move_acc": 0.3995,
+      "loss@100": 7.4766,
+      "loss@500": 2.5586,
+      "loss@1000": 2.0117
+    },
+    "elapsed": 246.75790190696716
+  }
+}

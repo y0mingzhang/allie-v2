@@ -1,0 +1,8 @@
+{
+  "n_samples": 40000,
+  "hidden_dim": 1024,
+  "final_val_loss": 0.2801784873008728,
+  "final_correlation": 0.24162283539772034,
+  "final_sign_accuracy": 0.5131250023841858,
+  "probe_weights_path": "results/value_probe_200M_weights.pt"
+}

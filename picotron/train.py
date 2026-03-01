@@ -2,6 +2,7 @@
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --config tmp/fast_benchmark/120M_model_tiny_stories_dp=4.json
 CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --config tmp/dummy/llama2_7b_benchmark.json
 """
+
 import os
 import copy
 import inspect
@@ -16,44 +17,133 @@ from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel
 import picotron.process_group_manager as pgm
-from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params
+from picotron.utils import (
+    average_loss_across_dp_cp_ranks,
+    set_all_seed,
+    print,
+    to_readable_format,
+    get_mfu,
+    get_num_params,
+)
 from picotron.checkpoint import CheckpointManager
-from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
+from picotron.checkpoint import (
+    init_model_with_dematerialized_weights,
+    init_model_with_materialized_weights,
+)
 from picotron.data import MicroBatchDataLoader, NpyTokenDataset
 from picotron.process_group_manager import setup_process_group_manager
-from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
+from picotron.pipeline_parallel.pipeline_parallel import (
+    train_step_pipeline_1f1b,
+    train_step_pipeline_afab,
+    PipelineParallel,
+)
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama, Qwen3Model
 from picotron.utils import download_model
-from picotron.optim import create_optimizer, OptimizerConfig, DEFAULT_NS_COEFFICIENTS, DEFAULT_NS_STEPS
+from picotron.optim import (
+    create_optimizer,
+    OptimizerConfig,
+    DEFAULT_NS_COEFFICIENTS,
+    DEFAULT_NS_STEPS,
+)
 import gc
 import torch
 import wandb
 
-def train_step(model, data_loader, device):
+
+def build_loss_weights(config, device):
+    """Build per-token loss weights based on token type."""
+    move_w = config.get("training", {}).get("move_loss_weight")
+    meta_w = config.get("training", {}).get("metadata_loss_weight")
+    if move_w is None and meta_w is None:
+        return None
+    if move_w is None:
+        move_w = 1.0
+    if meta_w is None:
+        meta_w = 1.0
+    if move_w == 1.0 and meta_w == 1.0:
+        return None
+    vocab_size = config["model"]["vocab_size"]
+    weights = torch.full((vocab_size,), meta_w, device=device)
+    weights[378:2346] = move_w  # move token range
+    return weights
+
+
+def _extract_value_targets(input_ids, value_token_map=None):
+    """Extract game result targets from position 1 of each sequence (if present).
+
+    Value tokens at position 1: 2350=white_wins(+1), 2351=draw(0), 2352=black_wins(-1).
+    Returns per-position value targets (broadcast from game result) or None.
+    """
+    if value_token_map is None:
+        return None
+    # Position 1 should have the result token
+    result_tokens = input_ids[:, 1]  # (batch,)
+    targets = torch.zeros_like(result_tokens, dtype=torch.float32)
+    for tok_id, val in value_token_map.items():
+        targets[result_tokens == tok_id] = val
+    # Broadcast to all positions: (batch,) -> (batch, seq_len)
+    return targets.unsqueeze(1).expand_as(input_ids).float()
+
+
+def train_step(
+    model,
+    data_loader,
+    device,
+    loss_weights=None,
+    z_loss_coeff=0.0,
+    value_loss_coeff=0.0,
+    value_token_map=None,
+):
     acc_loss = 0.0
-    
+
     requires_grad_sync = pgm.process_group_manager.cp_dp_world_size > 1
     for i in range(data_loader.grad_acc_steps):
-        # get the next batch
         batch = next(data_loader)
         input_ids = batch["input_ids"].to(device)
         target_ids = batch["target_ids"].to(device)
 
-        # disable gradient synchronization for all but the last micro-batch
         if requires_grad_sync:
-            model.require_backward_grad_sync = (i == data_loader.grad_acc_steps - 1)
+            model.require_backward_grad_sync = i == data_loader.grad_acc_steps - 1
 
-        outputs = model(input_ids=input_ids)
+        # Clamp input IDs to vocab size (result tokens 2350-2352 exceed embedding dim)
+        vocab_size = getattr(model, "vocab_size", None) or getattr(model.module, "vocab_size", 2350)
+        model_input = input_ids.clamp(max=vocab_size - 1) if value_token_map else input_ids
+        outputs = model(input_ids=model_input)
 
-        # compute the loss
+        # Handle value head output
+        if isinstance(outputs, tuple):
+            logits, values = outputs
+        else:
+            logits, values = outputs, None
+
         batch_size, seq_len = input_ids.shape
-        target_ids = target_ids.reshape(-1)
-        outputs = outputs.view(seq_len*batch_size, -1)
-        loss = F.cross_entropy(outputs, target_ids, reduction='mean') / data_loader.grad_acc_steps
-        
-        loss.backward()
+        flat_targets = target_ids.reshape(-1)
+        flat_targets = flat_targets.clamp(max=logits.shape[-1] - 1)
+        flat_logits = logits.view(seq_len * batch_size, -1)
 
+        if loss_weights is not None:
+            per_token_loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+            w = loss_weights[flat_targets]
+            loss = (per_token_loss * w).sum() / w.sum() / data_loader.grad_acc_steps
+        else:
+            loss = (
+                F.cross_entropy(flat_logits, flat_targets, reduction="mean")
+                / data_loader.grad_acc_steps
+            )
+
+        # Value loss
+        if values is not None and value_loss_coeff > 0:
+            value_targets = _extract_value_targets(input_ids, value_token_map)
+            if value_targets is not None:
+                value_loss = F.mse_loss(values, value_targets)
+                loss = loss + value_loss_coeff * value_loss / data_loader.grad_acc_steps
+
+        if z_loss_coeff > 0:
+            log_z = torch.logsumexp(flat_logits, dim=-1)
+            loss = loss + z_loss_coeff * (log_z**2).mean() / data_loader.grad_acc_steps
+
+        loss.backward()
         acc_loss += loss.item()
 
     return acc_loss
@@ -127,9 +217,9 @@ def build_lr_scheduler(optimizer, training_cfg):
     schedule_type = schedule_cfg.get("type", "").lower()
     if schedule_type != "warmup_stable_decay":
         raise ValueError(f"Unsupported lr_schedule type: {schedule_type}")
-    
-    
+
     return WarmupStableDecayScheduler(optimizer, training_cfg["learning_rate"], schedule_cfg)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -144,24 +234,42 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
     os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"]
     os.environ["DEVICE"] = "cpu" if config["distributed"]["use_cpu"] else "cuda"
-    if config["environment"].get("HF_TOKEN") is None:
-        if "HF_TOKEN" not in os.environ: raise ValueError("HF_TOKEN is neither set in the config file nor in the environment")
-    else:
-        if "HF_TOKEN" not in os.environ:
-            os.environ["HF_TOKEN"] = config["environment"]["HF_TOKEN"]
+    if not config["model"].get("random_init", False):
+        if config["environment"].get("HF_TOKEN") is None:
+            if "HF_TOKEN" not in os.environ:
+                raise ValueError(
+                    "HF_TOKEN is neither set in the config file nor in the environment"
+                )
         else:
-            print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() and not config["distributed"]["use_cpu"] else torch.float32
-    assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
+            if "HF_TOKEN" not in os.environ:
+                os.environ["HF_TOKEN"] = config["environment"]["HF_TOKEN"]
+    dtype = (
+        torch.bfloat16
+        if torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+        and not config["distributed"]["use_cpu"]
+        else torch.float32
+    )
+    assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv(
+        "FLASH_ATTEN"
+    ) != "1", "Kernel operations requires dtype=torch.bfloat16"
 
     local_rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
     backend = "gloo" if config["distributed"]["use_cpu"] else "nccl"
-    
-    assert config["training"]["seq_length"] % config["distributed"]["cp_size"] == 0, "seq_length must be divisible by cp_size for Context Parallelism"
-    assert world_size == config["distributed"]["tp_size"] * config["distributed"]["pp_size"] * config["distributed"]["dp_size"] * config["distributed"]["cp_size"], "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
+
+    assert config["training"]["seq_length"] % config["distributed"]["cp_size"] == 0, (
+        "seq_length must be divisible by cp_size for Context Parallelism"
+    )
+    assert (
+        world_size
+        == config["distributed"]["tp_size"]
+        * config["distributed"]["pp_size"]
+        * config["distributed"]["dp_size"]
+        * config["distributed"]["cp_size"]
+    ), "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
 
     if backend == "nccl":
         torch.cuda.set_device(local_rank)
@@ -169,14 +277,25 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
+    dist.init_process_group(
+        rank=global_rank,
+        world_size=world_size,
+        backend=backend,
+        init_method=f"env://",
+        timeout=datetime.timedelta(minutes=3),
+    )
     setup_process_group_manager(
         tp_size=config["distributed"]["tp_size"],
         cp_size=config["distributed"]["cp_size"],
         pp_size=config["distributed"]["pp_size"],
-        dp_size=config["distributed"]["dp_size"]
+        dp_size=config["distributed"]["dp_size"],
     )
-    is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
+    is_wandb_rank = (
+        pgm.process_group_manager.tp_rank == 0
+        and pgm.process_group_manager.dp_rank == 0
+        and pgm.process_group_manager.cp_rank == 0
+        and pgm.process_group_manager.pp_is_last_stage
+    )
 
     set_all_seed(config["training"]["seed"])
 
@@ -199,21 +318,28 @@ if __name__ == "__main__":
             val_dataset = NpyTokenDataset(
                 npy_glob_or_path=config["dataset"]["val_glob"],
                 seq_length=config["training"]["seq_length"],
-                num_samples=config["validation"].get("num_samples", None) if "validation" in config else None,
+                num_samples=config["validation"].get("num_samples", None)
+                if "validation" in config
+                else None,
             )
         except Exception as e:
             if pgm.process_group_manager.global_rank == 0:
                 print(f"Warning: could not initialize validation dataset: {e}", is_print_rank=True)
 
     # download model on the first rank, assume all ranks have access to the same filesystem
-    if pgm.process_group_manager.global_rank == 0:
-        download_model(config["model"]["name"], os.environ["HF_TOKEN"], f"hf_model_safetensors/{config['logging']['run_name']}")
+    if not config["model"].get("random_init", False):
+        if pgm.process_group_manager.global_rank == 0:
+            download_model(
+                config["model"]["name"],
+                os.environ["HF_TOKEN"],
+                f"hf_model_safetensors/{config['logging']['run_name']}",
+            )
 
     dist.barrier()
 
-    print(f"init dataloader time: {time.time()-start_time:.2f}s", is_print_rank=is_wandb_rank)
+    print(f"init dataloader time: {time.time() - start_time:.2f}s", is_print_rank=is_wandb_rank)
     tokens_per_step = data_loader.global_batch_size * config["training"]["seq_length"]
-    
+
     if pgm.process_group_manager.global_rank == 0:
         print("Tokens per step:", to_readable_format(tokens_per_step), is_print_rank=is_wandb_rank)
 
@@ -248,23 +374,42 @@ if __name__ == "__main__":
         print(f"rank {pgm.process_group_manager.global_rank}: Creating model config")
         model_config = AutoConfig.from_pretrained(config["model"]["name"])
         # twist the model structure if specified in the config file
-        model_config.num_hidden_layers = model_config.num_hidden_layers if "num_hidden_layers" not in config["model"] else config["model"]["num_hidden_layers"]
-        model_config.num_attention_heads = model_config.num_attention_heads if "num_attention_heads" not in config["model"] else config["model"]["num_attention_heads"]
-        model_config.num_key_value_heads = model_config.num_key_value_heads if "num_key_value_heads" not in config["model"] else config["model"]["num_key_value_heads"]
+        for attr in (
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "hidden_size",
+            "intermediate_size",
+            "head_dim",
+            "embed_shortcut",
+            "zero_init_proj",
+            "hidden_act",
+            "value_head",
+        ):
+            if attr in config["model"]:
+                setattr(model_config, attr, config["model"][attr])
         if "vocab_size" in config["model"] and config["model"]["vocab_size"] is not None:
             model_config.vocab_size = config["model"]["vocab_size"]
         model_config.max_position_embeddings = config["training"]["seq_length"]
+        if "tie_word_embeddings" in config["model"]:
+            model_config.tie_word_embeddings = config["model"]["tie_word_embeddings"]
         objects = [model_config]
     else:
         objects = [None]
 
     dist.broadcast_object_list(objects, src=0, device=device)
     model_config = objects[0]
-    print(f"rank {pgm.process_group_manager.global_rank}: Broadcasting model_config to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
+    print(
+        f"rank {pgm.process_group_manager.global_rank}: Broadcasting model_config to all ranks",
+        is_print_rank=pgm.process_group_manager.global_rank == 0,
+    )
 
     dist.barrier()
 
-    print(f"rank {pgm.process_group_manager.global_rank}: Initializing model meta device", is_print_rank=is_wandb_rank)
+    print(
+        f"rank {pgm.process_group_manager.global_rank}: Initializing model meta device",
+        is_print_rank=is_wandb_rank,
+    )
 
     start_time = time.time()
 
@@ -278,9 +423,20 @@ if __name__ == "__main__":
         if pgm.process_group_manager.pp_world_size > 1:
             model = PipelineParallel(model, model_config)
 
-    model = init_model_with_materialized_weights(model, model_config, save_dir=f"hf_model_safetensors/{config['logging']['run_name']}")
-
-    #TODO: load existing checkpoint here to continue pre-training
+    if config["model"].get("random_init", False):
+        # Random init: create zero tensors for all params/buffers, load, then reset
+        state_dict = {}
+        for name, param in model.named_parameters():
+            state_dict[name] = torch.zeros(param.shape, dtype=param.dtype, device="cpu")
+        for name, buf in model.named_buffers():
+            state_dict[name] = torch.zeros(buf.shape, dtype=buf.dtype, device="cpu")
+        model.load_state_dict(state_dict, strict=False, assign=True)
+        model.reset_parameters()
+        dist.barrier()
+    else:
+        model = init_model_with_materialized_weights(
+            model, model_config, save_dir=f"hf_model_safetensors/{config['logging']['run_name']}"
+        )
 
     if pgm.process_group_manager.global_rank == 0:
         print("Model architecture:", is_print_rank=is_wandb_rank)
@@ -295,26 +451,33 @@ if __name__ == "__main__":
     if compile_cfg.get("torch_compile", False):
         if not hasattr(torch, "compile"):
             if pgm.process_group_manager.global_rank == 0:
-                print("Warning: torch.compile is not available in this PyTorch build; skipping compilation.", is_print_rank=True)
+                print(
+                    "Warning: torch.compile is not available in this PyTorch build; skipping compilation.",
+                    is_print_rank=True,
+                )
         else:
             print("compiling model...", is_print_rank=is_wandb_rank)
             model = torch.compile(model)
-    
+
     if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallelBucket(model)
-    
-    print(f"init model parallel time: {time.time()-start_time:.2f}s", is_print_rank=is_wandb_rank)
-    
+
+    print(f"init model parallel time: {time.time() - start_time:.2f}s", is_print_rank=is_wandb_rank)
+
     model.train()
     num_params = get_num_params(model)
     print(f"Number of parameters: {to_readable_format(num_params)}", is_print_rank=is_wandb_rank)
-    
-    tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, model_config.hidden_size)
-    
+
+    tensor_shapes = (
+        data_loader.micro_batch_size,
+        data_loader.seq_length_per_gpu,
+        model_config.hidden_size,
+    )
+
     extra_args = dict()
     if config["model"]["use_fused_adam"]:
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device == 'cuda'
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device == "cuda"
         extra_args = dict(fused=True) if use_fused else dict()
 
     def build_optimizer_config(training_cfg):
@@ -350,47 +513,77 @@ if __name__ == "__main__":
     optimizer_config = build_optimizer_config(config["training"])
     adam_kwargs = extra_args if extra_args else None
     optimizer = create_optimizer(model, optimizer_config, adam_extra_kwargs=adam_kwargs)
-    
+
     checkpoint_manager = CheckpointManager()
 
     trained_tokens, step = 0, 0
     if config["checkpoint"]["load_path"]:
-        step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, config["checkpoint"]["load_path"])
+        step, trained_tokens = checkpoint_manager.load_checkpoint(
+            model, optimizer, config["checkpoint"]["load_path"]
+        )
         # Fast-forward the dataloader to match the checkpoint step
         print(f"fast forwarding dataloader to step {step}", is_print_rank=is_wandb_rank)
         data_loader.fast_forward_to_step(step)
-    
+
     dist.barrier()
     gc.collect()
     torch.cuda.empty_cache()
-    
+
     lr_scheduler = build_lr_scheduler(optimizer, config["training"])
-    lr_scheduler.step(step) # in case we loaded a checkpoint
+    lr_scheduler.step(step)  # in case we loaded a checkpoint
 
     grad_clip_norm = config["training"].get("grad_clip_norm")
+    loss_weights = build_loss_weights(config, device)
+    z_loss_coeff = config["training"].get("z_loss_coeff", 0.0)
+    value_loss_coeff = config["training"].get("value_loss_coeff", 0.0)
+    value_token_map = {2350: 1.0, 2351: 0.0, 2352: -1.0} if value_loss_coeff > 0 else None
 
-    while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
+    # move token id range for accuracy tracking
+    try:
+        from data.tokenizer import Tokenizer
+
+        _move_ids = [Tokenizer.token_to_idx[t] for t in Tokenizer.chess_move_tokens]
+        move_id_min, move_id_max = min(_move_ids), max(_move_ids)
+    except Exception:
+        move_id_min, move_id_max = 375, 2347
+
+    while (
+        config["training"]["max_tokens"] is None
+        or trained_tokens < config["training"]["max_tokens"]
+    ):
         step_start_time = time.time()
         optimizer.zero_grad()
-        
+
         if pgm.process_group_manager.pp_world_size > 1:
             if config["distributed"]["pp_engine"] == "afab":
                 loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
             elif config["distributed"]["pp_engine"] == "1f1b":
                 loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype)
             else:
-                raise ValueError(f"Invalid pipeline parallel engine: {config['distributed']['pp_engine']}")
+                raise ValueError(
+                    f"Invalid pipeline parallel engine: {config['distributed']['pp_engine']}"
+                )
         else:
-            loss = train_step(model, data_loader, device)
-            
+            loss = train_step(
+                model,
+                data_loader,
+                device,
+                loss_weights=loss_weights,
+                z_loss_coeff=z_loss_coeff,
+                value_loss_coeff=value_loss_coeff,
+                value_token_map=value_token_map,
+            )
+
         loss = average_loss_across_dp_cp_ranks(loss, device)
 
         grad_norm_pre_clip_tensor = compute_grad_norm(model.parameters())
-        grad_norm_pre_clip = grad_norm_pre_clip_tensor.item() if grad_norm_pre_clip_tensor is not None else None
+        grad_norm_pre_clip = (
+            grad_norm_pre_clip_tensor.item() if grad_norm_pre_clip_tensor is not None else None
+        )
 
         if grad_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-        
+
         optimizer.step()
         if lr_scheduler is not None:
             lr = lr_scheduler.step(step + 1)
@@ -398,18 +591,22 @@ if __name__ == "__main__":
             lr = optimizer.param_groups[0]["lr"]
         trained_tokens += tokens_per_step
         step += 1
-        
-        if hasattr(model, 'reset'):
+
+        if hasattr(model, "reset"):
             model.reset()
 
         step_duration = time.time() - step_start_time
         tokens_per_second = tokens_per_step / step_duration
         tokens_per_second_per_gpu = tokens_per_second / world_size
         mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config)
-        
+
         if is_wandb_rank:
             grad_norm_display_value = grad_norm_pre_clip
-            grad_norm_display = f"{grad_norm_display_value:6.2f}" if grad_norm_display_value is not None else "   n/a"
+            grad_norm_display = (
+                f"{grad_norm_display_value:6.2f}"
+                if grad_norm_display_value is not None
+                else "   n/a"
+            )
             print(
                 f"[rank {pgm.process_group_manager.global_rank}] "
                 f"Step: {step:<5d} | "
@@ -421,9 +618,9 @@ if __name__ == "__main__":
                 f"GradNorm: {grad_norm_display} | "
                 f"MFU: {mfu:5.2f}% | "
                 f"Memory usage: {torch.cuda.memory_reserved() / 1e9:6.2f}GB",
-                is_print_rank=is_wandb_rank
+                is_print_rank=is_wandb_rank,
             )
-        
+
         if is_wandb_rank and config["logging"]["use_wandb"]:
             log_payload = {
                 "loss": loss,
@@ -437,18 +634,25 @@ if __name__ == "__main__":
                 "grad_norm_pre_clip": grad_norm_pre_clip,
                 "step": step,
             }
-        
+
         if step % config["checkpoint"]["save_frequency"] == 0:
-            checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config["checkpoint"]["save_dir"]+f"/{step}")
+            checkpoint_manager.save_checkpoint(
+                model,
+                optimizer,
+                step,
+                trained_tokens,
+                config["checkpoint"]["save_dir"] + f"/{step}",
+            )
 
         # Validation loop (optional)
-        if val_dataset is not None and step % config.get("validation", {}).get("every_steps", 1000) == 0:
+        if (
+            val_dataset is not None
+            and step % config.get("validation", {}).get("every_steps", 1000) == 0
+        ):
             model.eval()
             with torch.no_grad():
-                # Evaluate on as many sequences as fit in one global batch
                 eval_seq = min(len(val_dataset), data_loader.global_batch_size)
                 if eval_seq > 0:
-                    # Build a small batch on this rank only
                     start = 0
                     end = min(eval_seq, data_loader.micro_batch_size)
                     batch_tokens = []
@@ -459,21 +663,59 @@ if __name__ == "__main__":
                         inputs = batch_input_ids[:, :-1]
                         targets = batch_input_ids[:, 1:]
                         outputs = model(input_ids=inputs)
+                        if isinstance(outputs, tuple):
+                            logits_out, _ = outputs
+                        else:
+                            logits_out = outputs
                         bs, sl = inputs.shape
-                        logits = outputs.view(bs * sl, -1)
-                        targets = targets.reshape(-1)
-                        val_loss = F.cross_entropy(logits, targets, reduction='mean')
+                        logits = logits_out.view(bs * sl, -1)
+                        flat_targets = targets.reshape(-1).clamp(max=logits.shape[-1] - 1)
+                        val_loss = F.cross_entropy(logits, flat_targets, reduction="mean")
                         val_loss = average_loss_across_dp_cp_ranks(val_loss, device)
+
+                        # move-specific metrics
+                        preds = logits.argmax(dim=-1)
+                        move_mask = (flat_targets >= move_id_min) & (flat_targets <= move_id_max)
+                        if move_mask.any():
+                            move_acc = (
+                                (preds[move_mask] == flat_targets[move_mask]).float().mean().item()
+                            )
+                            move_loss = F.cross_entropy(logits[move_mask], flat_targets[move_mask])
+                            bits_per_move = (move_loss / 0.6931471805599453).item()  # ln(2)
+                        else:
+                            move_acc = 0.0
+                            bits_per_move = 0.0
+
                         if is_wandb_rank and config["logging"]["use_wandb"]:
-                            log_payload = log_payload | {"val_loss": val_loss, "trained_tokens": trained_tokens}
+                            log_payload = log_payload | {
+                                "val_loss": val_loss,
+                                "val_move_acc": move_acc,
+                                "val_bits_per_move": bits_per_move,
+                                "trained_tokens": trained_tokens,
+                            }
+                        if is_wandb_rank:
+                            print(
+                                f"  Val loss: {val_loss:.4f} | Move acc: {move_acc:.4f} | Bits/move: {bits_per_move:.4f}",
+                                is_print_rank=True,
+                            )
             model.train()
-        
+
         if is_wandb_rank and config["logging"]["use_wandb"]:
             wandb.log(log_payload, step=step)
 
         if step >= config["training"]["total_train_steps"]:
             break
-    
+
+    # Save final checkpoint if not already saved at this step
+    if step % config["checkpoint"]["save_frequency"] != 0:
+        checkpoint_manager.save_checkpoint(
+            model,
+            optimizer,
+            step,
+            trained_tokens,
+            config["checkpoint"]["save_dir"] + f"/{step}",
+        )
+
     if is_wandb_rank and config["logging"]["use_wandb"]:
         wandb.finish()
 

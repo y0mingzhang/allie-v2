@@ -1,0 +1,56 @@
+{
+  "medium_run": {
+    "model": {
+      "params": "153M",
+      "hidden_size": 1024,
+      "intermediate_size": 3072,
+      "num_hidden_layers": 12,
+      "num_attention_heads": 8,
+      "num_key_value_heads": 4,
+      "head_dim": 128
+    },
+    "training": {
+      "total_steps": 5000,
+      "lr": 0.015,
+      "micro_batch_size": 64,
+      "tokens_per_step": "524K",
+      "total_tokens": "2.62B",
+      "data_tokens": "708M",
+      "data_epochs": 3.7,
+      "throughput": "580K tok/s",
+      "memory": "33.67GB/GPU"
+    },
+    "results": {
+      "final_loss": 1.567,
+      "final_val_loss": 1.578,
+      "final_move_acc": 0.5013,
+      "val_at_steps": {
+        "200": {"val_loss": 7.3438, "move_acc": 0.0980},
+        "400": {"val_loss": 3.0938, "move_acc": 0.2563},
+        "600": {"val_loss": 2.4688, "move_acc": 0.3251},
+        "800": {"val_loss": 2.2031, "move_acc": 0.3624},
+        "1000": {"val_loss": 2.0469, "move_acc": 0.3937},
+        "1200": {"val_loss": 1.9531, "move_acc": 0.4114},
+        "1400": {"val_loss": 1.8906, "move_acc": 0.4245},
+        "1600": {"val_loss": 1.8438, "move_acc": 0.4338},
+        "1800": {"val_loss": 1.8125, "move_acc": 0.4422},
+        "2000": {"val_loss": 1.7812, "move_acc": 0.4490},
+        "2200": {"val_loss": 1.7578, "move_acc": 0.4537},
+        "2400": {"val_loss": 1.7344, "move_acc": 0.4613},
+        "2600": {"val_loss": 1.7188, "move_acc": 0.4629},
+        "2800": {"val_loss": 1.7031, "move_acc": 0.4688},
+        "3000": {"val_loss": 1.6875, "move_acc": 0.4720},
+        "3200": {"val_loss": 1.6719, "move_acc": 0.4773},
+        "3400": {"val_loss": 1.6641, "move_acc": 0.4810},
+        "3600": {"val_loss": 1.6562, "move_acc": 0.4801},
+        "3800": {"val_loss": 1.6484, "move_acc": 0.4816},
+        "4000": {"val_loss": 1.6406, "move_acc": 0.4862},
+        "4200": {"val_loss": 1.6328, "move_acc": 0.4869},
+        "4400": {"val_loss": 1.6250, "move_acc": 0.4882},
+        "4600": {"val_loss": 1.6016, "move_acc": 0.4934},
+        "4800": {"val_loss": 1.5859, "move_acc": 0.5006},
+        "5000": {"val_loss": 1.5781, "move_acc": 0.5013}
+      }
+    }
+  }
+}

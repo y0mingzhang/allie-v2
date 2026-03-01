@@ -203,7 +203,8 @@ def process_game(game: dict) -> dict:
     """Process a game by parsing and tokenizing it."""
     parsed = parse_game(game)
     tokens = tokenize_game(parsed)
-    return {"tokens": tokens}
+    result = game.get("Result", "*")
+    return {"tokens": tokens, "result": result}
 
 
 def _read_parquet_list(list_file: str) -> list[str]:
@@ -246,40 +247,38 @@ def _resolve_input_and_relative_path(parquet_arg: str) -> tuple[list[str], str]:
 def process_shard(
     path: str,
     dataset_root_path: str,
-) -> Dataset:
+) -> None:
     data_files, rel_path = _resolve_input_and_relative_path(path)
 
-    # Determine output path and short-circuit if a valid processed parquet already exists
     out_path = f"{dataset_root_path}/{rel_path}"
     if not out_path.endswith(".parquet"):
         out_path = f"{out_path}.parquet"
 
     if _is_processed_parquet_ok(out_path):
-        logger.info("Using existing processed shard: %s", out_path)
-        return load_dataset("parquet", data_files=[out_path], split="train")
+        logger.info("Skipping existing processed shard: %s", out_path)
+        return
 
-    logger.info("Processing shard: input=%s -> output=%s", path, out_path)
-    shard = load_dataset("parquet", data_files=data_files, split="train")
-    original_len = len(shard)
+    import tempfile
 
-    # Filter and process
-    num_proc = os.cpu_count()
-    shard = shard.filter(should_keep_game, num_proc=num_proc)
-    shard = shard.map(
-        process_game,
-        num_proc=num_proc,
-        remove_columns=[c for c in shard.features if c != "Site"],
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        logger.info("Processing shard: input=%s -> output=%s", path, out_path)
+        shard = load_dataset("parquet", data_files=data_files, split="train", cache_dir=tmpdir)
+        original_len = len(shard)
 
-    # Write as a single parquet using the underlying Arrow table
-    table = shard.data.table
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    pq.write_table(table, out_path)
+        num_proc = min(os.cpu_count() or 1, 8)
+        shard = shard.filter(should_keep_game, num_proc=num_proc)
+        shard = shard.map(
+            process_game,
+            num_proc=num_proc,
+            remove_columns=[c for c in shard.features if c != "Site"],
+        )
 
-    logger.info("Wrote processed shard to %s", out_path)
-    logger.info("After filtering: %d games (from %d)", len(shard), original_len)
+        table = shard.data.table
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        pq.write_table(table, out_path)
 
-    return shard
+        logger.info("Wrote processed shard to %s", out_path)
+        logger.info("After filtering: %d games (from %d)", len(shard), original_len)
 
 
 def _is_processed_parquet_ok(path: str) -> bool:
@@ -323,12 +322,26 @@ def process_shards(
     paths: list[str],
     dataset_root_path: str,
 ) -> None:
-    """Read a list of parquet paths, filter games, tokenize, and save concatenated tokens.
+    """Read a list of parquet paths, filter games, tokenize, and save concatenated tokens."""
+    import shutil
 
-    Filtering uses the same logic as single-parquet processing in this module.
-    """
-    for path in paths:
-        process_shard(path, dataset_root_path)
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    hub_cache = os.path.join(hf_home, "hub", "datasets--Lichess--standard-chess-games", "blobs")
+    for i, path in enumerate(paths):
+        try:
+            process_shard(path, dataset_root_path)
+        except Exception as e:
+            logger.warning("Failed to process %s: %s", path, e)
+        # periodically clean hub download cache to avoid disk quota issues
+        if (i + 1) % 20 == 0 and os.path.isdir(hub_cache):
+            cache_size = sum(
+                os.path.getsize(os.path.join(hub_cache, f))
+                for f in os.listdir(hub_cache)
+                if os.path.isfile(os.path.join(hub_cache, f))
+            )
+            if cache_size > 10 * 1024**3:  # >10GB
+                logger.info("Cleaning hub cache (%d GB)", cache_size // 1024**3)
+                shutil.rmtree(hub_cache, ignore_errors=True)
 
 
 def main() -> None:

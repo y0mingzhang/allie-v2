@@ -1,0 +1,41 @@
+{
+  "date": "2026-02-27",
+  "eval_type": "vllm_greedy_vs_stockfish",
+  "note": "SF depth = SF skill level, no CPL analysis, correct prompt encoding",
+  "models": {
+    "200M_v3": {
+      "checkpoint": "models/main_runs_v2/qwen-3-200M-v3/20000",
+      "elo_conditioning": {
+        "2000": {
+          "sf1_d1": {"w": 18, "d": 1, "l": 1, "n": 20, "score": 0.925},
+          "sf3_d3": {"w": 12, "d": 1, "l": 7, "n": 20, "score": 0.625},
+          "sf5_d5": {"w": 4, "d": 2, "l": 14, "n": 20, "score": 0.25},
+          "sf10_d10": {"w": 0, "d": 0, "l": 20, "n": 20, "score": 0.0},
+          "sf15_d15": {"w": 0, "d": 0, "l": 20, "n": 20, "score": 0.0}
+        },
+        "2800": {
+          "sf3_d3": {"w": 23, "d": 3, "l": 4, "n": 30, "score": 0.817},
+          "sf5_d5": {"w": 4, "d": 5, "l": 21, "n": 30, "score": 0.217}
+        }
+      },
+      "estimated_elo": 1300
+    },
+    "200M_engine_mix": {
+      "checkpoint": "models/main_runs_v2/qwen-3-200M-engine-mix/10000",
+      "elo_conditioning": {
+        "2000": {
+          "sf1_d1": {"w": 18, "d": 1, "l": 1, "n": 20, "score": 0.925},
+          "sf3_d3_50g": {"w": 21, "d": 5, "l": 24, "n": 50, "score": 0.47},
+          "sf5_d5": {"w": 4, "d": 4, "l": 12, "n": 20, "score": 0.30}
+        }
+      },
+      "estimated_elo": 1200
+    }
+  },
+  "key_findings": [
+    "v3 generalizes better to stronger opponents (66% vs 42% at SF3)",
+    "engine-mix dominates at SF1 (90%) but falls off sharply",
+    "elo 2800 conditioning helps vs weak opponents (+15% at SF3) but hurts vs strong (-12% at SF5)",
+    "vLLM inference confirmed working with correct export (tie_word_embeddings, layer_types fixes)"
+  ]
+}

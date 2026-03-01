@@ -259,11 +259,14 @@ def _apply_model_overrides(model_cfg: AutoConfig, overrides: dict, train_cfg: di
     if overrides.get("vocab_size") is not None:
         model_cfg.vocab_size = overrides["vocab_size"]
 
-    # Embedding tying (Picotron doesn't tie embeddings for Qwen models)
+    # Embedding tying: detect from checkpoint (no final_proj = tied embeddings)
     if overrides.get("tie_word_embeddings") is not None:
         model_cfg.tie_word_embeddings = overrides["tie_word_embeddings"]
-    elif getattr(model_cfg, "model_type", "") in {"qwen", "qwen2", "qwen3"}:
-        model_cfg.tie_word_embeddings = False
+
+    # Fix layer_types to match num_hidden_layers
+    if hasattr(model_cfg, "layer_types") and hasattr(model_cfg, "num_hidden_layers"):
+        if len(model_cfg.layer_types) != model_cfg.num_hidden_layers:
+            model_cfg.layer_types = model_cfg.layer_types[:1] * model_cfg.num_hidden_layers
 
     # Max position embeddings (use seq_length from training config if not specified)
     max_pos = overrides.get("max_position_embeddings")
@@ -387,7 +390,9 @@ def picotron_to_hf_key(key: str) -> str:
     return key
 
 
-def convert_state_dict_to_hf(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+def convert_state_dict_to_hf(
+    model: torch.nn.Module, model_cfg: AutoConfig
+) -> dict[str, torch.Tensor]:
     """Convert model state dict from Picotron to HuggingFace format."""
     logger.info("Converting state dict to HuggingFace format")
     picotron_state = model.state_dict()
@@ -395,6 +400,11 @@ def convert_state_dict_to_hf(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     for key, tensor in picotron_state.items():
         hf_key = picotron_to_hf_key(key)
         hf_state[hf_key] = tensor.detach().cpu()
+
+    # Detect tied embeddings: no lm_head weight in converted state
+    if "lm_head.weight" not in hf_state:
+        logger.info("No lm_head.weight found — model uses tied embeddings")
+        model_cfg.tie_word_embeddings = True
 
     # Sanity check: verify vocab size in converted state
     if "model.embed_tokens.weight" in hf_state:
@@ -480,6 +490,7 @@ def save_hf_artifacts(
         logger.info("Generating HuggingFace tokenizer from custom chess tokenizer")
         try:
             from data.tokenizer import Tokenizer
+
             hf_tok = Tokenizer.to_huggingface()
             hf_tok.save_pretrained(out_path)
             logger.info("✓ Generated HuggingFace tokenizer")
@@ -508,7 +519,9 @@ def _generate_readme(output_dir: str, repo_id: str, checkpoint_path: str, config
 
     # Extract relevant info
     model_type = hf_config.get("model_type", "unknown")
-    base_model = train_config.get("model", {}).get("hf_base", train_config.get("model", {}).get("name", "unknown"))
+    base_model = train_config.get("model", {}).get(
+        "hf_base", train_config.get("model", {}).get("name", "unknown")
+    )
     num_layers = hf_config.get("num_hidden_layers", "N/A")
     hidden_size = hf_config.get("hidden_size", "N/A")
     vocab_size = hf_config.get("vocab_size", "N/A")
@@ -518,7 +531,7 @@ def _generate_readme(output_dir: str, repo_id: str, checkpoint_path: str, config
     seq_length = train_config.get("training", {}).get("seq_length", "N/A")
     lr = train_config.get("training", {}).get("lr", "N/A")
 
-    readme_content = f"""# {repo_id.split('/')[-1]}
+    readme_content = f"""# {repo_id.split("/")[-1]}
 
 ## Config
 - **Base Model**: {base_model}
@@ -536,11 +549,13 @@ def _generate_readme(output_dir: str, repo_id: str, checkpoint_path: str, config
 
     readme_path = out_path / "README.md"
     logger.info(f"Generating README at {readme_path}")
-    with open(readme_path, 'w') as f:
+    with open(readme_path, "w") as f:
         f.write(readme_content)
 
 
-def upload_to_hub(output_dir: str, repo_id: str, checkpoint_path: str, config_path: str, private: bool = False) -> None:
+def upload_to_hub(
+    output_dir: str, repo_id: str, checkpoint_path: str, config_path: str, private: bool = False
+) -> None:
     """Upload exported model to HuggingFace Hub."""
     if not HF_HUB_AVAILABLE:
         raise ImportError(
@@ -616,7 +631,7 @@ def main() -> None:
         model_cfg = build_model_config(config_dict)
         model = instantiate_model(model_cfg)
         load_checkpoint(model, args.checkpoint)
-        hf_state = convert_state_dict_to_hf(model)
+        hf_state = convert_state_dict_to_hf(model, model_cfg)
         save_hf_artifacts(model_cfg, hf_state, args.output_dir, args.tokenizer_dir, args.dtype)
 
         # Upload to HuggingFace Hub if requested

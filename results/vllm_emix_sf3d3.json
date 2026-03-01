@@ -1,0 +1,12 @@
+{
+  "model": "/tmp/export_200M_emix",
+  "sf_level": 3,
+  "elo_conditioning": 2000,
+  "n_games": 20,
+  "wins": 0,
+  "draws": 0,
+  "losses": 20,
+  "win_rate": 0.0,
+  "avg_cpl": 236.30064875730213,
+  "time_per_game": 9.759200322628022
+}
