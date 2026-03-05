@@ -348,3 +348,24 @@ Learning ~2x faster per token than 200M. Projected final: 53-56% at step 57K.
 3. If 400M shows improvement, scale to 600M-1B on full_v3 data
 4. vLLM MCTS with 400M model for stronger playing strength
 5. Continue data processing (14.2K/26K parquets done) → 50B+ tokens for future runs
+
+## AlphaZero MCTS Self-Play (2026-03-05)
+
+Ran 4 versions of AlphaZero-style MCTS self-play on the 200M v3 model:
+
+| Version | Mix Ratio | LR | Iters | SF1 avg | SF3 avg | SF5 avg | Stable? |
+|---|---|---|---|---|---|---|---|
+| v1 | 0 | 3e-5 | 7 | 83% | 55% | 30% | Partially |
+| v2 | 0 | 5e-6 | 4 | 88% | 60% | 45% | NO (collapsed iter 5) |
+| v3 | 3x PT | 5e-6 | 5 | 88% | 66% | 32% | YES |
+| v4 | 1x PT | 5e-6 | 3 | 80% | 77% | 23% | NO (oscillating) |
+| Baseline | - | - | - | 80% | 60% | 30% | - |
+
+Key findings:
+- MCTS self-play improves SF1 (80%→88%) and SF3 (60%→66%) consistently
+- Pretraining data mixing (3x) prevents catastrophic forgetting (v3 = first stable version)
+- SF5 improvement is inconsistent (peaks at 45-60% but doesn't sustain)
+- Lower mixing (1x) allows too much forgetting; higher mixing (3x) is more stable
+- Speed bottleneck: ~2h/iter with 200M HF model
+
+Scripts: `scripts/alphazero_selfplay.py`, `scripts/az_v3_mixed.py`
