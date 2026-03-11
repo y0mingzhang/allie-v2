@@ -60,3 +60,7 @@ models/
 log*.out
 export/
 slurm-*.out
+
+# Large model files from self-play experiments
+results/*/model/
+results/*/value_head.pt
