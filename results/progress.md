@@ -369,3 +369,40 @@ Key findings:
 - Speed bottleneck: ~2h/iter with 200M HF model
 
 Scripts: `scripts/alphazero_selfplay.py`, `scripts/az_v3_mixed.py`
+
+## Fast vLLM MCTS Self-Play (2026-03-12)
+
+Rewrote self-play to use vLLM for inference — **12x speedup** (10 min/iter vs 2h).
+
+Architecture: vLLM generates MCTS games (40s) → HF trains with 3x pretraining mix (500s) → vLLM evals (60s) → repeat.
+
+200M v3 model, 10 iterations, 20 games/iter, 50 MCTS sims:
+
+| Iter | SF1 | SF3 | SF5 |
+|---|---|---|---|
+| 0 (baseline) | 65% | 55% | 15% |
+| 4 (peak SF3) | 75% | 85% | 40% |
+| 8 (peak SF1/SF5) | 95% | 65% | 45% |
+| 10 (final) | 85% | 65% | 25% |
+| **Average** | **78%** | **68%** | **28%** |
+
+Improvement: SF1 +14%, SF3 +13%, SF5 +13%. No collapse through 10 iterations.
+
+Gap to AlphaZero scale: we use 20 games/iter × 50 sims (AlphaZero: 25K games × 800 sims). Need 10-100x more games and sims to target SF10+.
+
+Script: `scripts/selfplay_v3.py`
+
+## Current Status (2026-03-13)
+
+**Best models:**
+- 1.7B (allie-v2): 62% move-match, deployed on Lichess
+- 600M v3: 53.7% move-match, 100% SF1, 35% SF5
+- 200M v3 + self-play: SF1 95%, SF3 85%, SF5 45% (peak)
+
+**Target:** defeat SF15-20 (grandmaster level, ~2600-3000+ elo). Current models struggle above SF5 (~1600 elo). Need ~1000 elo improvement.
+
+**Next steps:**
+1. Scale self-play to 200+ games/iter, 100+ sims on 600M model
+2. Eval all models against SF5/8/10/15/20 to establish baselines
+3. Run self-play targeting SF10+ opponents
+4. Consider larger base models (1.7B) for self-play

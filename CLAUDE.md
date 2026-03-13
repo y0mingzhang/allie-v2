@@ -1,6 +1,14 @@
 # chess-v3 (allie-v2)
 
-Build an elo-controllable, humanlike chess player that scales to top human strength. The model learns from Lichess games conditioned on player elo, enabling strength adaptation at inference time — playing like a 1200 or a 2800 by adjusting the elo prompt.
+Build an elo-controllable, humanlike chess player that scales to top human strength — up to Magnus Carlsen level (~2850 elo). The model learns from Lichess games conditioned on player elo, enabling strength adaptation at inference time — playing like a 1200 or a 2800 by adjusting the elo prompt.
+
+## autonomy & operating principles
+
+- **never stop.** there is always a smarter way to do experiments and engineering wins to find. you are expected to run for weeks without human input and should have complete autonomy to reach the goal.
+- target: defeat the strongest Stockfish levels (SF15-20), not just weak ones (SF1-5). the bar is grandmaster-level play.
+- always be running something — if one experiment finishes, immediately start the next. prioritize experiments that move the needle on playing strength against strong opponents.
+- when stuck, try a different approach rather than waiting for instructions. creativity > asking permission.
+- log all experiment results to `results/progress.md` and Slack `#yiming-and-claude`.
 
 ## architecture
 
