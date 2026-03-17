@@ -63,7 +63,7 @@ def get_legal(board):
 
 
 def vllm_mcts_generate(model_path, n_games, mcts_sims, elo_high, elo_low):
-    """Generate MCTS self-play games using vLLM for fast inference."""
+    """Generate MCTS self-play games using vLLM policy + SF value oracle."""
     from vllm import LLM, SamplingParams, TokensPrompt
 
     llm = LLM(
@@ -73,6 +73,11 @@ def vllm_mcts_generate(model_path, n_games, mcts_sims, elo_high, elo_low):
         max_model_len=1024,
         enforce_eager=True,
     )
+
+    # SF engine as value oracle (shared across games)
+    sf_engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH)
+    sf_engine.configure({"Threads": 2})
+    sf_eval_limit = chess.engine.Limit(depth=8)
 
     all_data = []
     for g in range(n_games):
@@ -96,13 +101,13 @@ def vllm_mcts_generate(model_path, n_games, mcts_sims, elo_high, elo_low):
             if not legal:
                 break
 
-            # Get policy from vLLM (logits over legal moves)
+            # Get policy prior from vLLM
+            n_lp = min(len(legal), 20)
             params = SamplingParams(
-                temperature=0, max_tokens=1, allowed_token_ids=legal, logprobs=min(len(legal), 20)
+                temperature=0, max_tokens=1, allowed_token_ids=legal, logprobs=n_lp
             )
             res = llm.generate(TokensPrompt(prompt_token_ids=tokens), params)
 
-            # Extract logprobs for MCTS policy prior
             logprobs = res[0].outputs[0].logprobs[0] if res[0].outputs[0].logprobs else {}
             policy = {}
             for tok in legal:
@@ -113,23 +118,42 @@ def vllm_mcts_generate(model_path, n_games, mcts_sims, elo_high, elo_low):
             total = sum(policy.values())
             policy = {k: v / total for k, v in policy.items()}
 
-            # Simple MCTS: use policy prior + random rollouts
-            # For speed, use policy-weighted sampling instead of full tree search
-            visit_counts = {tok: 0 for tok in legal}
-            for _ in range(mcts_sims):
-                # Sample from policy with Dirichlet noise
-                noise = np.random.dirichlet([0.3] * len(legal))
-                probs = []
-                for i, tok in enumerate(legal):
-                    p = 0.75 * policy.get(tok, 1 / len(legal)) + 0.25 * noise[i]
-                    ucb = p * math.sqrt(sum(visit_counts.values()) + 1) / (1 + visit_counts[tok])
-                    probs.append(ucb)
-                total_p = sum(probs)
-                probs = [p / total_p for p in probs]
-                chosen = random.choices(legal, probs)[0]
-                visit_counts[chosen] += 1
+            # MCTS with SF value oracle: evaluate top-K candidate moves
+            # Score each move = policy_prior * value_from_SF
+            top_k = min(len(legal), mcts_sims)  # evaluate up to mcts_sims moves
+            sorted_moves = sorted(policy.items(), key=lambda x: -x[1])[:top_k]
 
-            # Normalize visit counts
+            visit_counts = {}
+            for tok, prior in sorted_moves:
+                uci = tok2uci.get(tok)
+                if not uci:
+                    continue
+                move = chess.Move.from_uci(uci)
+                if move not in board.legal_moves:
+                    continue
+
+                # SF evaluation after this move
+                board.push(move)
+                try:
+                    info = sf_engine.analyse(board, sf_eval_limit)
+                    cp = info["score"].white().score(mate_score=10000)
+                    # Normalize to [0, 1] from white's perspective
+                    value = 1.0 / (1.0 + math.exp(-cp / 200.0))  # sigmoid
+                    if board.turn == chess.WHITE:
+                        value = 1.0 - value  # flip: we just played as the side that moved
+                except Exception:
+                    value = 0.5
+                board.pop()
+
+                # Combined score: policy prior + SF value
+                combined = prior * (0.5 + value)  # boost moves SF likes
+                # Convert to visit counts proportional to combined score
+                visit_counts[tok] = max(1, int(combined * mcts_sims))
+
+            if not visit_counts:
+                # Fallback to pure policy
+                visit_counts = {tok: max(1, int(p * mcts_sims)) for tok, p in sorted_moves}
+
             total_visits = sum(visit_counts.values())
             mcts_policy = {tok: v / total_visits for tok, v in visit_counts.items() if v > 0}
 
@@ -174,6 +198,7 @@ def vllm_mcts_generate(model_path, n_games, mcts_sims, elo_high, elo_low):
                 f"{len(all_data)} positions"
             )
 
+    sf_engine.quit()
     del llm
     torch.cuda.empty_cache()
     return all_data
@@ -183,15 +208,10 @@ def vllm_mcts_generate(model_path, n_games, mcts_sims, elo_high, elo_low):
 
 
 def train_mixed(model_path, mcts_data, lr, mix_ratio, pretrain_path, device="cuda:0"):
-    """Train on MCTS data + pretraining mix."""
+    """Train policy on MCTS data + pretraining mix. No value head (SF is oracle)."""
     from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16).to(device)
-
-    # Add value head
-    hidden_size = model.config.hidden_size
-    model.value_head = torch.nn.Linear(hidden_size, 1).to(device).to(torch.bfloat16)
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     pretrain = np.memmap(pretrain_path, dtype=np.uint16, mode="r")
     pretrain_len = len(pretrain) // 1024
@@ -201,26 +221,15 @@ def train_mixed(model_path, mcts_data, lr, mix_ratio, pretrain_path, device="cud
 
     random.shuffle(mcts_data)
     for td in mcts_data:
-        # MCTS policy distillation
+        # Policy distillation: match MCTS visit distribution
         input_ids = torch.tensor(td["prefix"], dtype=torch.long, device=device).unsqueeze(0)
         input_ids = input_ids.clamp(max=model.config.vocab_size - 1)
-        outputs = model(input_ids=input_ids, output_hidden_states=True)
-        logits = outputs.logits[0, -1]
+        logits = model(input_ids=input_ids).logits[0, -1]
 
         legal_toks = list(td["mcts_policy"].keys())
         target_probs = torch.tensor([td["mcts_policy"][t] for t in legal_toks], device=device)
         pred_logits = torch.stack([logits[t] for t in legal_toks])
-        policy_loss = F.kl_div(
-            F.log_softmax(pred_logits, dim=-1), target_probs, reduction="batchmean"
-        )
-
-        # Value loss
-        hidden = outputs.hidden_states[-1][0, -1]
-        pred_value = torch.tanh(model.value_head(hidden.to(model.value_head.weight.dtype)))
-        target_v = torch.tensor(td["value"], device=device, dtype=pred_value.dtype)
-        value_loss = F.mse_loss(pred_value.squeeze(), target_v)
-
-        loss = policy_loss + value_loss
+        loss = F.kl_div(F.log_softmax(pred_logits, dim=-1), target_probs, reduction="batchmean")
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -247,9 +256,8 @@ def train_mixed(model_path, mcts_data, lr, mix_ratio, pretrain_path, device="cud
                 total_pt += pt_loss.item()
                 n_pt += 1
 
-    # Save (strip value head for vLLM compat)
+    # Save
     model.eval()
-    delattr(model, "value_head")
     model.save_pretrained(model_path)
     del model, optimizer
     torch.cuda.empty_cache()
