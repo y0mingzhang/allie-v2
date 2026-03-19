@@ -406,3 +406,24 @@ Script: `scripts/selfplay_v3.py`
 2. Eval all models against SF5/8/10/15/20 to establish baselines
 3. Run self-play targeting SF10+ opponents
 4. Consider larger base models (1.7B) for self-play
+
+## SF Oracle Search at Inference (2026-03-19)
+
+**Key breakthrough: search at inference >> RL at training.**
+
+600M model + SF depth-8 oracle reranking top-K candidates:
+| Config | vs SF5 | vs SF8 | vs SF10 | vs SF15 |
+|---|---|---|---|---|
+| Greedy | 32% | 2% | 2% | ~0% |
+| + oracle top-5 | 50% | 48% | 40% | 8% |
+| + oracle top-10 | 50% | 50% | 42% | - |
+
+Learned value probe (corr=0.26) too weak for move selection (0% vs SF5 — worse than greedy). Need corr > 0.5 for useful MCTS.
+
+All RL approaches on 200M model produced SF5 avg ~30% (no improvement from 30% baseline):
+- Fake MCTS: 28%
+- SF oracle MCTS: 31%
+- Scaled MCTS (200g): 28%
+- Expert iteration v2: 31%
+
+**Conclusion: the policy is already good. The value function is the bottleneck for playing strength.** Search at inference with a strong value oracle (SF) dramatically improves play. Training a learned value function to replace SF is the key challenge.
